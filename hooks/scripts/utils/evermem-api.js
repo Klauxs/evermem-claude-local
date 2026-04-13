@@ -145,12 +145,13 @@ export function transformSearchResults(apiResponse) {
 
 
 /**
- * Add a memory to EverMem Cloud
+ * Add a memory to EverMem Cloud (v1).
+ * Uses /api/v1/memories/group when config.groupId is set, else /api/v1/memories (personal).
  * @param {Object} message - Message to store
  * @param {string} message.content - Message content
  * @param {string} message.role - 'user' or 'assistant'
- * @param {string} message.messageId - Unique message ID
- * @returns {Promise<Object>} API response
+ * @param {string} [message.messageId] - (unused in v1; accepted for backward compatibility)
+ * @returns {Promise<Object>} Debug envelope { url, body, status, ok, response }
  */
 export async function addMemory(message) {
   const config = getConfig();
@@ -159,19 +160,35 @@ export async function addMemory(message) {
     throw new Error('EverMem API key not configured');
   }
 
-  const url = `${config.apiBaseUrl}/api/v0/memories`;
-  const requestBody = {
-    message_id: message.messageId || generateMessageId(),
-    create_time: new Date().toISOString(),
-    sender: message.role === 'assistant' ? 'claude-assistant' : config.userId,
-    sender_name: message.role === 'assistant' ? 'Claude' : 'User',
-    role: message.role || 'user',
-    content: message.content,
-    group_id: config.groupId,
-    group_name: 'Claude Code Session'
+  const role = message.role === 'assistant' ? 'assistant' : 'user';
+  const sender_id = role === 'assistant' ? 'claude-assistant' : config.userId;
+
+  const baseMessage = {
+    sender_id,
+    role,
+    timestamp: Date.now(),
+    content: message.content
   };
 
-  // Make the actual API call
+  let url;
+  let requestBody;
+
+  if (config.groupId) {
+    url = `${config.apiBaseUrl}/api/v1/memories/group`;
+    requestBody = {
+      group_id: config.groupId,
+      messages: [baseMessage],
+      async_mode: true
+    };
+  } else {
+    url = `${config.apiBaseUrl}/api/v1/memories`;
+    requestBody = {
+      user_id: config.userId,
+      messages: [baseMessage],
+      async_mode: true
+    };
+  }
+
   let response, responseText, responseData, status, ok;
 
   try {
@@ -195,7 +212,6 @@ export async function addMemory(message) {
     responseText = fetchError.message;
   }
 
-  // Always return full info for debugging
   return {
     url,
     body: requestBody,
