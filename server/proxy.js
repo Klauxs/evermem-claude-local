@@ -10,7 +10,6 @@
  */
 
 import http from 'http';
-import { execSync } from 'child_process';
 import { readFileSync, existsSync } from 'fs';
 import { dirname, join } from 'path';
 import { fileURLToPath } from 'url';
@@ -104,13 +103,12 @@ const server = http.createServer((req, res) => {
     return;
   }
 
-  // Handle POST /api/v0/memories (list) - forwards as GET with body
-  if (req.method === 'POST' && req.url === '/api/v0/memories') {
+  // Forward POST /api/v1/memories/{search,get} to the EverMind API
+  if (req.method === 'POST' && (req.url === '/api/v1/memories/search' || req.url === '/api/v1/memories/get')) {
     let body = '';
-
     req.on('data', chunk => { body += chunk; });
 
-    req.on('end', () => {
+    req.on('end', async () => {
       const authHeader = req.headers['authorization'];
       if (!authHeader) {
         sendJson(res, 401, { error: 'Missing Authorization header' });
@@ -118,54 +116,26 @@ const server = http.createServer((req, res) => {
       }
 
       try {
-        // Forward as GET with body using curl
-        const jsonBody = body.replace(/'/g, "'\\''");
-        const curlCmd = `curl -s -X GET "${API_BASE}/api/v0/memories" -H "Authorization: ${authHeader}" -H "Content-Type: application/json" -d '${jsonBody}'`;
-
-        const result = execSync(curlCmd, { timeout: 30000, encoding: 'utf8' });
-        const data = JSON.parse(result);
-        sendJson(res, 200, data);
-      } catch (error) {
-        console.error('Proxy error:', error.message);
-        sendJson(res, 500, {
-          error: 'Proxy request failed',
-          message: error.message,
-          stdout: error.stdout?.toString(),
-          stderr: error.stderr?.toString()
+        const upstream = await fetch(`${API_BASE}${req.url}`, {
+          method: 'POST',
+          headers: {
+            'Authorization': authHeader,
+            'Content-Type': 'application/json'
+          },
+          body
         });
-      }
-    });
-    return;
-  }
 
-  // Handle POST /api/v0/memories/search - forwards as GET with body
-  if (req.method === 'POST' && req.url === '/api/v0/memories/search') {
-    let body = '';
-
-    req.on('data', chunk => { body += chunk; });
-
-    req.on('end', () => {
-      const authHeader = req.headers['authorization'];
-      if (!authHeader) {
-        sendJson(res, 401, { error: 'Missing Authorization header' });
-        return;
-      }
-
-      try {
-        // Forward as GET with body using curl
-        const jsonBody = body.replace(/'/g, "'\\''");
-        const curlCmd = `curl -s -X GET "${API_BASE}/api/v0/memories/search" -H "Authorization: ${authHeader}" -H "Content-Type: application/json" -d '${jsonBody}'`;
-
-        const result = execSync(curlCmd, { timeout: 30000, encoding: 'utf8' });
-        const data = JSON.parse(result);
-        sendJson(res, 200, data);
+        const text = await upstream.text();
+        sendCorsHeaders(res);
+        res.writeHead(upstream.status, {
+          'Content-Type': upstream.headers.get('content-type') || 'application/json'
+        });
+        res.end(text);
       } catch (error) {
         console.error('Proxy error:', error.message);
-        sendJson(res, 500, {
-          error: 'Proxy request failed',
-          message: error.message,
-          stdout: error.stdout?.toString(),
-          stderr: error.stderr?.toString()
+        sendJson(res, 502, {
+          error: 'Upstream request failed',
+          message: error.message
         });
       }
     });
