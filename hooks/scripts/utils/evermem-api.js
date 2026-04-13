@@ -27,12 +27,13 @@ function debugLog(msg, data = null) {
 }
 
 /**
- * Search memories from EverMem Cloud
+ * Search memories from EverMem Cloud (v1)
  * @param {string} query - Search query text
  * @param {Object} options - Additional options
  * @param {number} options.topK - Max results (default: 10)
- * @param {string} options.retrieveMethod - Search method (default: 'hybrid')
- * @returns {Promise<Object>} Search results
+ * @param {string} options.retrieveMethod - Search method: keyword|vector|hybrid|agentic (default: 'hybrid')
+ * @param {string[]} options.memoryTypes - Memory types (default: ['episodic_memory'])
+ * @returns {Promise<Object>} Raw API response with _debug envelope
  */
 export async function searchMemories(query, options = {}) {
   const config = getConfig();
@@ -47,106 +48,98 @@ export async function searchMemories(query, options = {}) {
     memoryTypes = ['episodic_memory']
   } = options;
 
+  const url = `${config.apiBaseUrl}/api/v1/memories/search`;
+  const filters = config.groupId
+    ? { group_id: config.groupId }
+    : { user_id: config.userId };
+
+  const requestBody = {
+    query,
+    method: retrieveMethod,
+    top_k: topK,
+    memory_types: memoryTypes,
+    filters
+  };
+
+  debug('searchMemories request body', requestBody);
+
+  const debugEnvelope = {
+    url,
+    requestBody,
+    apiKeyMasked: 'API_KEY_HIDDEN'
+  };
+
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), TIMEOUT_MS);
 
   try {
-    // Build request body (API uses GET with body - need curl since fetch doesn't support it)
-    const requestBody = {
-      query,
-      retrieve_method: retrieveMethod,
-      top_k: topK,
-      include_metadata: true,
-      memory_types: memoryTypes
-    };
-    // Scope to user and group
-    if (config.userId) {
-      requestBody.user_id = config.userId;
-    }
-    if (config.groupId) {
-      requestBody.group_ids = [config.groupId];
-    }
-    debug('searchMemories request body', requestBody);
+    const response = await fetch(url, {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${config.apiKey}`,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify(requestBody),
+      signal: controller.signal
+    });
+
     clearTimeout(timeoutId);
 
-    // Use curl since Node.js fetch doesn't support GET with body
-    // Escape single quotes in JSON for shell safety: ' -> '\''
-    const jsonBody = JSON.stringify(requestBody).replace(/'/g, "'\\''");
-    const curlCmd = `curl -s -X GET "${config.apiBaseUrl}/api/v0/memories/search" -H "Authorization: Bearer ${config.apiKey}" -H "Content-Type: application/json" -d '${jsonBody}'`;
-
-    // Return debug info along with result
-    let result, data;
+    const text = await response.text();
+    let data;
     try {
-      result = execSync(curlCmd, { timeout: TIMEOUT_MS, encoding: 'utf8' });
-      data = JSON.parse(result);
-    } catch (e) {
-      // Return error info for debugging
-      return {
-        _debug: {
-          curl: curlCmd.replace(config.apiKey, 'API_KEY_HIDDEN'),
-          requestBody,
-          error: e.message,
-          stdout: e.stdout?.toString(),
-          stderr: e.stderr?.toString()
-        }
-      };
+      data = JSON.parse(text);
+    } catch {
+      return { _debug: { ...debugEnvelope, status: response.status, rawBody: text, error: 'non-JSON response' } };
     }
 
-    // Attach debug info to response
-    data._debug = {
-      curl: curlCmd.replace(config.apiKey, 'API_KEY_HIDDEN'),
-      requestBody
-    };
+    if (!response.ok) {
+      return { _debug: { ...debugEnvelope, status: response.status, error: data } };
+    }
+
+    data._debug = debugEnvelope;
     return data;
   } catch (error) {
     clearTimeout(timeoutId);
-
     if (error.name === 'AbortError') {
       throw new Error(`API timeout after ${TIMEOUT_MS}ms`);
     }
-    throw error;
+    return { _debug: { ...debugEnvelope, error: error.message } };
   }
 }
 
 /**
- * Transform API response to plugin memory format
- * @param {Object} apiResponse - Raw API response
- * @returns {Object[]} Formatted memories
+ * Transform v1 search API response to plugin memory format.
+ * v1 returns: { data: { episodes: [{ id, user_id, session_id, timestamp, summary, subject, score, participants, group_id? }], ... } }
+ * @param {Object} apiResponse - Raw v1 API response
+ * @returns {Object[]} Formatted memories sorted by score desc
  */
 export function transformSearchResults(apiResponse) {
-  if (!apiResponse?.result) {
+  const episodes = apiResponse?.data?.episodes;
+  if (!Array.isArray(episodes)) {
     return [];
   }
 
   const memories = [];
-  const result = apiResponse.result;
-  const memoryList = result.memories || [];
-
-  // API returns: memories[].episode for content, memories[].subject for title, memories[].score for relevance
-  for (let i = 0; i < memoryList.length; i++) {
-    const mem = memoryList[i];
-
-    // Use episode as the content
-    const content = mem.episode || '';
+  for (const ep of episodes) {
+    const content = ep.summary || '';
     if (!content) continue;
 
     memories.push({
       text: content,
-      subject: mem.subject || '',  // Title for display
-      timestamp: mem.timestamp || new Date().toISOString(),
-      memoryType: mem.memory_type,  // Keep raw type if needed
-      score: mem.score || 0,  // Score is now inside each memory object
+      subject: ep.subject || '',
+      timestamp: ep.timestamp || new Date().toISOString(),
+      memoryType: ep.memory_type || 'episodic_memory',
+      score: ep.score || 0,
       metadata: {
-        groupId: mem.group_id,
-        type: mem.type,
-        participants: mem.participants
+        groupId: ep.group_id,
+        type: ep.memory_type,
+        participants: ep.participants
       }
     });
   }
 
-  // Sort by score descending
   memories.sort((a, b) => b.score - a.score);
-
   return memories;
 }
 
