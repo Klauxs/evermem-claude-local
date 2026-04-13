@@ -221,14 +221,6 @@ export async function addMemory(message) {
 }
 
 /**
- * Generate a unique message ID
- * @returns {string} Message ID
- */
-function generateMessageId() {
-  return `cc_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
-}
-
-/**
  * Get memories from EverMem Cloud (v1, ordered newest first by default).
  * @param {Object} options - Options
  * @param {number} options.page - Page number (default: 1)
