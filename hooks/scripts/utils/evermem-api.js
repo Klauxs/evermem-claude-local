@@ -7,7 +7,6 @@ import { getConfig } from './config.js';
 import { appendFileSync } from 'fs';
 import { homedir } from 'os';
 import { join } from 'path';
-import { execSync } from 'child_process';
 import { debug, setDebugPrefix } from './debug.js';
 
 // Set debug prefix for this script
@@ -230,12 +229,12 @@ function generateMessageId() {
 }
 
 /**
- * Get memories from EverMem Cloud (ordered by time, old to new)
+ * Get memories from EverMem Cloud (v1, ordered newest first by default).
  * @param {Object} options - Options
  * @param {number} options.page - Page number (default: 1)
  * @param {number} options.pageSize - Results per page (default: 100, max: 100)
  * @param {string} options.memoryType - Memory type filter (default: 'episodic_memory')
- * @returns {Promise<Object>} API response with memories
+ * @returns {Promise<Object>} Raw v1 response { data: { episodes, total_count, count, ... } }
  */
 export async function getMemories(options = {}) {
   const config = getConfig();
@@ -250,59 +249,55 @@ export async function getMemories(options = {}) {
     memoryType = 'episodic_memory'
   } = options;
 
-  // Build query params
-  const params = new URLSearchParams({
-    user_id: config.userId,
+  const filters = config.groupId
+    ? { group_id: config.groupId }
+    : { user_id: config.userId };
+
+  const url = `${config.apiBaseUrl}/api/v1/memories/get`;
+  const requestBody = {
     memory_type: memoryType,
-    page: page.toString(),
-    page_size: pageSize.toString()
+    filters,
+    page,
+    page_size: pageSize,
+    rank_by: 'timestamp',
+    rank_order: 'desc'
+  };
+
+  const response = await fetch(url, {
+    method: 'POST',
+    headers: {
+      'Authorization': `Bearer ${config.apiKey}`,
+      'Content-Type': 'application/json'
+    },
+    body: JSON.stringify(requestBody)
   });
 
-  if (config.groupId) {
-    params.append('group_ids', [config.groupId]);
+  if (!response.ok) {
+    const errorText = await response.text();
+    throw new Error(`API error ${response.status}: ${errorText}`);
   }
 
-  const url = `${config.apiBaseUrl}/api/v0/memories?${params}`;
-
-  try {
-    const response = await fetch(url, {
-      method: 'GET',
-      headers: {
-        'Authorization': `Bearer ${config.apiKey}`,
-        'Content-Type': 'application/json'
-      }
-    });
-
-    if (!response.ok) {
-      const errorText = await response.text();
-      throw new Error(`API error ${response.status}: ${errorText}`);
-    }
-
-    return await response.json();
-  } catch (error) {
-    throw error;
-  }
+  return await response.json();
 }
 
 /**
- * Transform getMemories response to simple format
- * @param {Object} apiResponse - Raw API response
- * @returns {Object[]} Formatted memories (newest first, sorted by timestamp)
+ * Transform v1 getMemories response to simple format.
+ * @param {Object} apiResponse - Raw v1 API response
+ * @returns {Object[]} Formatted memories newest-first
  */
 export function transformGetMemoriesResults(apiResponse) {
-  if (!apiResponse?.result?.memories) {
+  const episodes = apiResponse?.data?.episodes;
+  if (!Array.isArray(episodes)) {
     return [];
   }
 
-  const memories = apiResponse.result.memories.map(mem => ({
-    text: mem.episode || '',
-    subject: mem.subject || '',
-    timestamp: mem.timestamp || mem.create_time || new Date().toISOString(),
-    groupId: mem.group_id
+  const memories = episodes.map(ep => ({
+    text: ep.episode || ep.summary || '',
+    subject: ep.subject || '',
+    timestamp: ep.timestamp || new Date().toISOString(),
+    groupId: ep.group_id
   })).filter(m => m.text);
 
-  // Sort by timestamp descending (newest first)
   memories.sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp));
-
   return memories;
 }
