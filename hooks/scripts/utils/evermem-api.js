@@ -4,26 +4,11 @@
  */
 
 import { getConfig } from './config.js';
-import { appendFileSync } from 'fs';
-import { homedir } from 'os';
-import { join } from 'path';
 import { debug, setDebugPrefix } from './debug.js';
 
 // Set debug prefix for this script
 setDebugPrefix('EverMemAPI');
 const TIMEOUT_MS = 30000; // 30 seconds
-const DEBUG = process.env.EVERMEM_DEBUG === '1';
-const LOG_FILE = join(homedir(), '.evermem-debug.log');
-
-function debugLog(msg, data = null) {
-  if (!DEBUG) return;
-  const timestamp = new Date().toISOString();
-  let line = `[${timestamp}] [API] ${msg}`;
-  if (data !== null) {
-    line += `: ${typeof data === 'string' ? data : JSON.stringify(data, null, 2)}`;
-  }
-  appendFileSync(LOG_FILE, line + '\n');
-}
 
 /**
  * Search memories from EverMem Cloud (v1)
