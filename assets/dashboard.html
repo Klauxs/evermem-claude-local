@@ -752,46 +752,73 @@
     checkProxy();
 
     async function fetchAllMemories() {
-      let allMemories = [];
-      let page = 1;
-      let hasMore = true;
+      // 1. Get the list of local groups for this API key
+      const groupsResponse = await fetch(`${PROXY_URL}/api/groups`, {
+        headers: { 'Authorization': `Bearer ${apiKey}` }
+      });
 
-      while (hasMore) {
-        const response = await fetch(`${PROXY_URL}/api/v0/memories`, {
-          method: 'POST',
-          headers: {
-            'Authorization': `Bearer ${apiKey}`,
-            'Content-Type': 'application/json'
-          },
-          body: JSON.stringify({
-            user_id: 'claude-code-user',
-            memory_type: 'episodic_memory',
-            page_size: 100,
-            page: page
-          })
-        });
+      if (!groupsResponse.ok) {
+        throw new Error(`Failed to load groups: ${groupsResponse.status} ${groupsResponse.statusText}`);
+      }
 
-        if (!response.ok) {
-          if (page === 1) {
-            const errorData = await response.json().catch(() => ({}));
-            throw new Error(errorData.message || `API error: ${response.status} ${response.statusText}`);
+      const groupsData = await groupsResponse.json();
+      const groups = groupsData.groups || [];
+
+      if (groups.length === 0) {
+        // No locally-tracked groups → nothing to show. v1 requires a concrete filter
+        // (user_id or group_id), so there is no "fetch everything" path.
+        return { data: { episodes: [] } };
+      }
+
+      // 2. For each group, paginate /api/v1/memories/get
+      const allEpisodes = [];
+      const PAGE_SIZE = 100;
+
+      for (const group of groups) {
+        let page = 1;
+        while (true) {
+          const response = await fetch(`${PROXY_URL}/api/v1/memories/get`, {
+            method: 'POST',
+            headers: {
+              'Authorization': `Bearer ${apiKey}`,
+              'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({
+              memory_type: 'episodic_memory',
+              filters: { group_id: group.id },
+              page,
+              page_size: PAGE_SIZE,
+              rank_by: 'timestamp',
+              rank_order: 'desc'
+            })
+          });
+
+          if (!response.ok) {
+            if (page === 1) {
+              const errorData = await response.json().catch(() => ({}));
+              // Surface error only for the first failure per group, then skip it
+              console.warn(`Group ${group.id} failed:`, errorData.message || response.status);
+            }
+            break;
           }
-          break;
-        }
 
-        const data = await response.json();
-        const pageMemories = (data.result?.memories || []);
+          const payload = await response.json();
+          const episodes = payload?.data?.episodes || [];
+          if (episodes.length === 0) break;
 
-        if (pageMemories.length === 0) {
-          hasMore = false;
-        } else {
-          allMemories = allMemories.concat(pageMemories);
-          hasMore = pageMemories.length >= 100;
-          page++;
+          // Attach group_id to each episode so the UI can filter/label by project
+          for (const ep of episodes) {
+            if (!ep.group_id) ep.group_id = group.id;
+          }
+          allEpisodes.push(...episodes);
+
+          const total = payload?.data?.total_count ?? Infinity;
+          if (episodes.length < PAGE_SIZE || page * PAGE_SIZE >= total) break;
+          page += 1;
         }
       }
 
-      return { result: { memories: allMemories } };
+      return { data: { episodes: allEpisodes } };
     }
 
     async function loadData() {
@@ -900,27 +927,28 @@
     }
 
     function transformApiResponse(apiResponse) {
-      if (!apiResponse?.result?.memories) return [];
+      const episodes = apiResponse?.data?.episodes;
+      if (!Array.isArray(episodes)) return [];
 
-      const memoryList = apiResponse.result.memories || [];
-      const scores = apiResponse.result.scores || [];
-
-      return memoryList.map((mem, i) => {
-        const timestamp = mem.timestamp || mem.create_time || new Date().toISOString();
+      return episodes.map((ep, i) => {
+        // v1 get → content in ep.episode; v1 search → content in ep.summary.
+        // Accept both so this transform works regardless of upstream endpoint.
+        const content = ep.episode || ep.summary || ep.content || '';
+        const timestamp = ep.timestamp || ep.create_time || new Date().toISOString();
         const date = new Date(timestamp);
 
         return {
-          id: mem.id || mem.message_id || `mem_${i}`,
-          content: mem.episode || mem.content || '',
-          subject: mem.subject || '',
-          groupId: mem.group_id || '',
-          participants: mem.participants || [],
-          timestamp: timestamp,
+          id: ep.id || ep.message_id || `mem_${i}`,
+          content,
+          subject: ep.subject || '',
+          groupId: ep.group_id || '',
+          participants: ep.participants || [],
+          timestamp,
           date: formatLocalDate(date),
           time: date.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' }),
-          score: scores[i] || 0,
-          memoryType: mem.memory_type,
-          summary: mem.summary || ''
+          score: ep.score || 0,
+          memoryType: ep.memory_type,
+          summary: ep.summary || ''
         };
       }).filter(m => m.content);
     }

@@ -762,17 +762,20 @@ The hook merges all `text` blocks to capture the complete response.
 
 ### API Upload
 
-Each message is sent to `POST /api/v0/memories`:
+Each message is sent to `POST /api/v1/memories/group` (or `POST /api/v1/memories` for personal memories):
 
 ```json
 {
-  "message_id": "u_1770367656189",
-  "create_time": "2026-02-06T08:47:36.189Z",
-  "sender": "claude-code-user",
-  "role": "user",
-  "content": "How do I add authentication?",
   "group_id": "claude-code:/path/to/project",
-  "group_name": "Claude Code Session"
+  "messages": [
+    {
+      "sender_id": "claude-code-user",
+      "role": "user",
+      "timestamp": 1770367656189,
+      "content": "How do I add authentication?"
+    }
+  ],
+  "async_mode": true
 }
 ```
 
@@ -822,7 +825,7 @@ The `/evermem:hub` command opens a web dashboard for visualizing memories. Due t
 │                                                                              │
 │  Data Flow:                                                                  │
 │  1. GET /api/groups → Local groups.jsonl (filtered by keyId)                │
-│  2. For each group: POST /api/v0/memories → Fetch memories                  │
+│  2. For each group: POST /api/v1/memories/get → Fetch memories               │
 │  3. Render dashboard with aggregated data                                    │
 └─────────────────────────────────────────────────────────────────────────────┘
                                     │
@@ -834,14 +837,14 @@ The `/evermem:hub` command opens a web dashboard for visualizing memories. Due t
 │  ┌─────────────────────────────────────────────────────────────────────┐   │
 │  │  GET  /              → Serve dashboard.html                          │   │
 │  │  GET  /api/groups    → Read groups.jsonl, filter by keyId           │   │
-│  │  POST /api/v0/memories → Convert to GET+body, forward to API        │   │
+│  │  POST /api/v1/memories/search → Forward to EverMind API             │   │
+│  │  POST /api/v1/memories/get    → Forward to EverMind API             │   │
 │  │  GET  /health        → Health check                                  │   │
 │  └─────────────────────────────────────────────────────────────────────┘   │
 │                                                                              │
 │  Why Proxy?                                                                  │
-│  - Browser limitation: GET requests can't have body                         │
-│  - EverMem API uses GET /api/v0/memories with JSON body                     │
-│  - Proxy receives POST, converts to GET+body using curl                     │
+│  - The proxy forwards browser calls to the EverMind API and serves the      │
+│    dashboard.                                                                │
 └─────────────────────────────────────────────────────────────────────────────┘
                                     │
                                     ▼
@@ -849,9 +852,9 @@ The `/evermem:hub` command opens a web dashboard for visualizing memories. Due t
 │                         EverMem Cloud API                                    │
 │                      https://api.evermind.ai                                 │
 │                                                                              │
-│  GET /api/v0/memories (with body)                                           │
-│  Request:  { user_id, group_id, memory_type, limit, offset }                │
-│  Response: { result: { memories[], total_count, has_more } }                │
+│  POST /api/v1/memories/search  { query, filters, method, memory_types, top_k } │
+│  POST /api/v1/memories/get     { memory_type, filters, page, page_size, ... }  │
+│  Response: { data: { episodes[], total_count, count } }                     │
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -880,9 +883,10 @@ function getGroupsForKey(keyId) {
   return Array.from(groupMap.values());
 }
 
-// Key route: Forward POST as GET+body (browser workaround)
-// Browser sends:  POST /api/v0/memories { body }
-// Proxy sends:    GET  /api/v0/memories { body } via curl
+// Key route: Forward POST requests to EverMind API
+// Browser sends:  POST /api/v1/memories/search  { query, filters, ... }
+// Browser sends:  POST /api/v1/memories/get     { memory_type, filters, ... }
+// Proxy forwards to upstream API with Authorization header
 ```
 
 ### Dashboard (`assets/dashboard.html`)
@@ -898,14 +902,16 @@ async function loadGroups() {
 
   // 2. For each group, fetch memories with pagination
   for (const group of groups) {
-    const data = await fetch('/api/v0/memories', {
+    const data = await fetch('/api/v1/memories/get', {
       method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        user_id: 'claude-code-user',
-        group_id: group.id,
         memory_type: 'episodic_memory',
-        limit: 100,
-        offset: 0
+        filters: { group_id: group.id },
+        page: 1,
+        page_size: 100,
+        rank_by: 'timestamp',
+        rank_order: 'desc'
       })
     });
 
@@ -1064,9 +1070,9 @@ evermem-plugin/
 
 The plugin uses the EverMem Cloud API at `https://api.evermind.ai`:
 
-- `POST /api/v0/memories` - Store a new memory
-- `GET /api/v0/memories/search` - Search memories (hybrid retrieval, with JSON body)
-- `GET /api/v0/memories` - Get memories (with query params)
+- `POST /api/v1/memories/group` - Store a new memory (group); `POST /api/v1/memories` for personal memories
+- `POST /api/v1/memories/search` - Search memories (hybrid retrieval, with JSON body)
+- `POST /api/v1/memories/get` - Get memories (list with JSON body)
 
 ## Development
 

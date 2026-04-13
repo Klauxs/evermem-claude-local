@@ -4,35 +4,20 @@
  */
 
 import { getConfig } from './config.js';
-import { appendFileSync } from 'fs';
-import { homedir } from 'os';
-import { join } from 'path';
-import { execSync } from 'child_process';
 import { debug, setDebugPrefix } from './debug.js';
 
 // Set debug prefix for this script
 setDebugPrefix('EverMemAPI');
 const TIMEOUT_MS = 30000; // 30 seconds
-const DEBUG = process.env.EVERMEM_DEBUG === '1';
-const LOG_FILE = join(homedir(), '.evermem-debug.log');
-
-function debugLog(msg, data = null) {
-  if (!DEBUG) return;
-  const timestamp = new Date().toISOString();
-  let line = `[${timestamp}] [API] ${msg}`;
-  if (data !== null) {
-    line += `: ${typeof data === 'string' ? data : JSON.stringify(data, null, 2)}`;
-  }
-  appendFileSync(LOG_FILE, line + '\n');
-}
 
 /**
- * Search memories from EverMem Cloud
+ * Search memories from EverMem Cloud (v1)
  * @param {string} query - Search query text
  * @param {Object} options - Additional options
  * @param {number} options.topK - Max results (default: 10)
- * @param {string} options.retrieveMethod - Search method (default: 'hybrid')
- * @returns {Promise<Object>} Search results
+ * @param {string} options.retrieveMethod - Search method: keyword|vector|hybrid|agentic (default: 'hybrid')
+ * @param {string[]} options.memoryTypes - Memory types (default: ['episodic_memory'])
+ * @returns {Promise<Object>} Raw API response with _debug envelope
  */
 export async function searchMemories(query, options = {}) {
   const config = getConfig();
@@ -47,117 +32,110 @@ export async function searchMemories(query, options = {}) {
     memoryTypes = ['episodic_memory']
   } = options;
 
+  const url = `${config.apiBaseUrl}/api/v1/memories/search`;
+  const filters = config.groupId
+    ? { group_id: config.groupId }
+    : { user_id: config.userId };
+
+  const requestBody = {
+    query,
+    method: retrieveMethod,
+    top_k: topK,
+    memory_types: memoryTypes,
+    filters
+  };
+
+  debug('searchMemories request body', requestBody);
+
+  const debugEnvelope = {
+    url,
+    requestBody,
+    apiKeyMasked: 'API_KEY_HIDDEN'
+  };
+
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), TIMEOUT_MS);
 
   try {
-    // Build request body (API uses GET with body - need curl since fetch doesn't support it)
-    const requestBody = {
-      query,
-      retrieve_method: retrieveMethod,
-      top_k: topK,
-      include_metadata: true,
-      memory_types: memoryTypes
-    };
-    // Scope to user and group
-    if (config.userId) {
-      requestBody.user_id = config.userId;
-    }
-    if (config.groupId) {
-      requestBody.group_ids = [config.groupId];
-    }
-    debug('searchMemories request body', requestBody);
+    const response = await fetch(url, {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${config.apiKey}`,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify(requestBody),
+      signal: controller.signal
+    });
+
     clearTimeout(timeoutId);
 
-    // Use curl since Node.js fetch doesn't support GET with body
-    // Escape single quotes in JSON for shell safety: ' -> '\''
-    const jsonBody = JSON.stringify(requestBody).replace(/'/g, "'\\''");
-    const curlCmd = `curl -s -X GET "${config.apiBaseUrl}/api/v0/memories/search" -H "Authorization: Bearer ${config.apiKey}" -H "Content-Type: application/json" -d '${jsonBody}'`;
-
-    // Return debug info along with result
-    let result, data;
+    const text = await response.text();
+    let data;
     try {
-      result = execSync(curlCmd, { timeout: TIMEOUT_MS, encoding: 'utf8' });
-      data = JSON.parse(result);
-    } catch (e) {
-      // Return error info for debugging
-      return {
-        _debug: {
-          curl: curlCmd.replace(config.apiKey, 'API_KEY_HIDDEN'),
-          requestBody,
-          error: e.message,
-          stdout: e.stdout?.toString(),
-          stderr: e.stderr?.toString()
-        }
-      };
+      data = JSON.parse(text);
+    } catch {
+      return { _debug: { ...debugEnvelope, status: response.status, rawBody: text, error: 'non-JSON response' } };
     }
 
-    // Attach debug info to response
-    data._debug = {
-      curl: curlCmd.replace(config.apiKey, 'API_KEY_HIDDEN'),
-      requestBody
-    };
+    if (!response.ok) {
+      return { _debug: { ...debugEnvelope, status: response.status, error: data } };
+    }
+
+    data._debug = debugEnvelope;
     return data;
   } catch (error) {
     clearTimeout(timeoutId);
-
     if (error.name === 'AbortError') {
       throw new Error(`API timeout after ${TIMEOUT_MS}ms`);
     }
-    throw error;
+    return { _debug: { ...debugEnvelope, error: error.message } };
   }
 }
 
 /**
- * Transform API response to plugin memory format
- * @param {Object} apiResponse - Raw API response
- * @returns {Object[]} Formatted memories
+ * Transform v1 search API response to plugin memory format.
+ * v1 returns: { data: { episodes: [{ id, user_id, session_id, timestamp, summary, subject, score, participants, group_id? }], ... } }
+ * @param {Object} apiResponse - Raw v1 API response
+ * @returns {Object[]} Formatted memories sorted by score desc
  */
 export function transformSearchResults(apiResponse) {
-  if (!apiResponse?.result) {
+  const episodes = apiResponse?.data?.episodes;
+  if (!Array.isArray(episodes)) {
     return [];
   }
 
   const memories = [];
-  const result = apiResponse.result;
-  const memoryList = result.memories || [];
-
-  // API returns: memories[].episode for content, memories[].subject for title, memories[].score for relevance
-  for (let i = 0; i < memoryList.length; i++) {
-    const mem = memoryList[i];
-
-    // Use episode as the content
-    const content = mem.episode || '';
+  for (const ep of episodes) {
+    const content = ep.summary || '';
     if (!content) continue;
 
     memories.push({
       text: content,
-      subject: mem.subject || '',  // Title for display
-      timestamp: mem.timestamp || new Date().toISOString(),
-      memoryType: mem.memory_type,  // Keep raw type if needed
-      score: mem.score || 0,  // Score is now inside each memory object
+      subject: ep.subject || '',
+      timestamp: ep.timestamp || new Date().toISOString(),
+      memoryType: ep.memory_type || 'episodic_memory',
+      score: ep.score || 0,
       metadata: {
-        groupId: mem.group_id,
-        type: mem.type,
-        participants: mem.participants
+        groupId: ep.group_id,
+        type: ep.memory_type,
+        participants: ep.participants
       }
     });
   }
 
-  // Sort by score descending
   memories.sort((a, b) => b.score - a.score);
-
   return memories;
 }
 
 
 /**
- * Add a memory to EverMem Cloud
+ * Add a memory to EverMem Cloud (v1).
+ * Uses /api/v1/memories/group when config.groupId is set, else /api/v1/memories (personal).
  * @param {Object} message - Message to store
  * @param {string} message.content - Message content
  * @param {string} message.role - 'user' or 'assistant'
- * @param {string} message.messageId - Unique message ID
- * @returns {Promise<Object>} API response
+ * @param {string} [message.messageId] - (unused in v1; accepted for backward compatibility)
+ * @returns {Promise<Object>} Debug envelope { url, body, status, ok, response }
  */
 export async function addMemory(message) {
   const config = getConfig();
@@ -166,19 +144,35 @@ export async function addMemory(message) {
     throw new Error('EverMem API key not configured');
   }
 
-  const url = `${config.apiBaseUrl}/api/v0/memories`;
-  const requestBody = {
-    message_id: message.messageId || generateMessageId(),
-    create_time: new Date().toISOString(),
-    sender: message.role === 'assistant' ? 'claude-assistant' : config.userId,
-    sender_name: message.role === 'assistant' ? 'Claude' : 'User',
-    role: message.role || 'user',
-    content: message.content,
-    group_id: config.groupId,
-    group_name: 'Claude Code Session'
+  const role = message.role === 'assistant' ? 'assistant' : 'user';
+  const sender_id = role === 'assistant' ? 'claude-assistant' : config.userId;
+
+  const baseMessage = {
+    sender_id,
+    role,
+    timestamp: Date.now(),
+    content: message.content
   };
 
-  // Make the actual API call
+  let url;
+  let requestBody;
+
+  if (config.groupId) {
+    url = `${config.apiBaseUrl}/api/v1/memories/group`;
+    requestBody = {
+      group_id: config.groupId,
+      messages: [baseMessage],
+      async_mode: true
+    };
+  } else {
+    url = `${config.apiBaseUrl}/api/v1/memories`;
+    requestBody = {
+      user_id: config.userId,
+      messages: [baseMessage],
+      async_mode: true
+    };
+  }
+
   let response, responseText, responseData, status, ok;
 
   try {
@@ -202,7 +196,6 @@ export async function addMemory(message) {
     responseText = fetchError.message;
   }
 
-  // Always return full info for debugging
   return {
     url,
     body: requestBody,
@@ -213,20 +206,12 @@ export async function addMemory(message) {
 }
 
 /**
- * Generate a unique message ID
- * @returns {string} Message ID
- */
-function generateMessageId() {
-  return `cc_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
-}
-
-/**
- * Get memories from EverMem Cloud (ordered by time, old to new)
+ * Get memories from EverMem Cloud (v1, ordered newest first by default).
  * @param {Object} options - Options
  * @param {number} options.page - Page number (default: 1)
  * @param {number} options.pageSize - Results per page (default: 100, max: 100)
  * @param {string} options.memoryType - Memory type filter (default: 'episodic_memory')
- * @returns {Promise<Object>} API response with memories
+ * @returns {Promise<Object>} Raw v1 response { data: { episodes, total_count, count, ... } }
  */
 export async function getMemories(options = {}) {
   const config = getConfig();
@@ -241,59 +226,55 @@ export async function getMemories(options = {}) {
     memoryType = 'episodic_memory'
   } = options;
 
-  // Build query params
-  const params = new URLSearchParams({
-    user_id: config.userId,
+  const filters = config.groupId
+    ? { group_id: config.groupId }
+    : { user_id: config.userId };
+
+  const url = `${config.apiBaseUrl}/api/v1/memories/get`;
+  const requestBody = {
     memory_type: memoryType,
-    page: page.toString(),
-    page_size: pageSize.toString()
+    filters,
+    page,
+    page_size: pageSize,
+    rank_by: 'timestamp',
+    rank_order: 'desc'
+  };
+
+  const response = await fetch(url, {
+    method: 'POST',
+    headers: {
+      'Authorization': `Bearer ${config.apiKey}`,
+      'Content-Type': 'application/json'
+    },
+    body: JSON.stringify(requestBody)
   });
 
-  if (config.groupId) {
-    params.append('group_ids', [config.groupId]);
+  if (!response.ok) {
+    const errorText = await response.text();
+    throw new Error(`API error ${response.status}: ${errorText}`);
   }
 
-  const url = `${config.apiBaseUrl}/api/v0/memories?${params}`;
-
-  try {
-    const response = await fetch(url, {
-      method: 'GET',
-      headers: {
-        'Authorization': `Bearer ${config.apiKey}`,
-        'Content-Type': 'application/json'
-      }
-    });
-
-    if (!response.ok) {
-      const errorText = await response.text();
-      throw new Error(`API error ${response.status}: ${errorText}`);
-    }
-
-    return await response.json();
-  } catch (error) {
-    throw error;
-  }
+  return await response.json();
 }
 
 /**
- * Transform getMemories response to simple format
- * @param {Object} apiResponse - Raw API response
- * @returns {Object[]} Formatted memories (newest first, sorted by timestamp)
+ * Transform v1 getMemories response to simple format.
+ * @param {Object} apiResponse - Raw v1 API response
+ * @returns {Object[]} Formatted memories newest-first
  */
 export function transformGetMemoriesResults(apiResponse) {
-  if (!apiResponse?.result?.memories) {
+  const episodes = apiResponse?.data?.episodes;
+  if (!Array.isArray(episodes)) {
     return [];
   }
 
-  const memories = apiResponse.result.memories.map(mem => ({
-    text: mem.episode || '',
-    subject: mem.subject || '',
-    timestamp: mem.timestamp || mem.create_time || new Date().toISOString(),
-    groupId: mem.group_id
+  const memories = episodes.map(ep => ({
+    text: ep.episode || ep.summary || '',
+    subject: ep.subject || '',
+    timestamp: ep.timestamp || new Date().toISOString(),
+    groupId: ep.group_id
   })).filter(m => m.text);
 
-  // Sort by timestamp descending (newest first)
   memories.sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp));
-
   return memories;
 }
