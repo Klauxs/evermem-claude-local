@@ -18,7 +18,7 @@ import { createHash } from 'crypto';
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
 const PORT = process.env.EVERMEM_PROXY_PORT || 3456;
-const API_BASE = 'https://api.evermind.ai';
+const API_BASE = process.env.EVERMEM_API_URL || 'https://api.evermind.ai';
 const GROUPS_FILE = join(__dirname, '..', 'data', 'groups.jsonl');
 
 /**
@@ -110,18 +110,16 @@ const server = http.createServer((req, res) => {
 
     req.on('end', async () => {
       const authHeader = req.headers['authorization'];
-      if (!authHeader) {
-        sendJson(res, 401, { error: 'Missing Authorization header' });
-        return;
-      }
 
       try {
+        const headers = { 'Content-Type': 'application/json' };
+        if (authHeader) {
+          headers['Authorization'] = authHeader;
+        }
+
         const upstream = await fetch(`${API_BASE}${req.url}`, {
           method: 'POST',
-          headers: {
-            'Authorization': authHeader,
-            'Content-Type': 'application/json'
-          },
+          headers,
           body
         });
 

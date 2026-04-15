@@ -27,15 +27,14 @@ export async function searchMemories(query, options = {}) {
   }
 
   const {
-    topK = 10,
+    topK = 15,
     retrieveMethod = 'hybrid',
     memoryTypes = ['episodic_memory']
   } = options;
 
   const url = `${config.apiBaseUrl}/api/v1/memories/search`;
-  const filters = config.groupId
-    ? { group_id: config.groupId }
-    : { user_id: config.userId };
+  // Always search by user_id for global scope (cross-project recall)
+  const filters = { user_id: config.userId };
 
   const requestBody = {
     query,
@@ -57,12 +56,14 @@ export async function searchMemories(query, options = {}) {
   const timeoutId = setTimeout(() => controller.abort(), TIMEOUT_MS);
 
   try {
+    const headers = { 'Content-Type': 'application/json' };
+    if (config.apiKey) {
+      headers['Authorization'] = `Bearer ${config.apiKey}`;
+    }
+
     const response = await fetch(url, {
       method: 'POST',
-      headers: {
-        'Authorization': `Bearer ${config.apiKey}`,
-        'Content-Type': 'application/json'
-      },
+      headers,
       body: JSON.stringify(requestBody),
       signal: controller.signal
     });
@@ -178,10 +179,9 @@ export async function addMemory(message) {
   try {
     response = await fetch(url, {
       method: 'POST',
-      headers: {
-        'Authorization': `Bearer ${config.apiKey}`,
-        'Content-Type': 'application/json'
-      },
+      headers: config.apiKey
+        ? { 'Authorization': `Bearer ${config.apiKey}`, 'Content-Type': 'application/json' }
+        : { 'Content-Type': 'application/json' },
       body: JSON.stringify(requestBody)
     });
     status = response.status;
@@ -242,10 +242,9 @@ export async function getMemories(options = {}) {
 
   const response = await fetch(url, {
     method: 'POST',
-    headers: {
-      'Authorization': `Bearer ${config.apiKey}`,
-      'Content-Type': 'application/json'
-    },
+    headers: config.apiKey
+      ? { 'Authorization': `Bearer ${config.apiKey}`, 'Content-Type': 'application/json' }
+      : { 'Content-Type': 'application/json' },
     body: JSON.stringify(requestBody)
   });
 

@@ -81,10 +81,10 @@ export function getApiBaseUrl() {
 
 /**
  * Check if the plugin is properly configured
- * @returns {boolean} True if API key is set
+ * @returns {boolean} True if API key or custom API URL is set
  */
 export function isConfigured() {
-  return !!getApiKey();
+  return !!getApiKey() || !!process.env.EVERMEM_API_URL;
 }
 
 /**
