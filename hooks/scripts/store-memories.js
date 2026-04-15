@@ -93,6 +93,19 @@ try {
   }
 
   /**
+   * Remove injected memory context to prevent memory pollution.
+   * Without this, the <relevant-memories> and <session-context> blocks
+   * would be saved back to EverMemOS, creating self-referential loops.
+   */
+  function stripInjectedContext(text) {
+    if (!text) return text;
+    return text
+      .replace(/<relevant-memories>[\s\S]*?<\/relevant-memories>/g, '')
+      .replace(/<session-context>[\s\S]*?<\/session-context>/g, '')
+      .trim();
+  }
+
+  /**
    * Extract the last turn's user input and assistant response
    *
    * A Turn = User sends message → Claude responds (may include multiple tool calls)
@@ -202,40 +215,43 @@ try {
     assistantPreview: lastAssistant?.slice(0, 100)
   });
 
-  // Run both in parallel with Promise.all
-  const promises = [];
+  // Clean injected context to prevent memory pollution
+  const cleanUser = stripInjectedContext(lastUser);
+  const cleanAssistant = stripInjectedContext(lastAssistant);
+
+  // Sequential write to preserve MemCell boundary detection order
   const results = [];
   const skipped = [];
 
   // Check if user content is meaningful
-  if (lastUser) {
-    if (hasContent(lastUser)) {
-      const len = lastUser.length;
-      promises.push(
-        addMemory({ content: lastUser, role: 'user', messageId: `u_${Date.now()}` })
-          .then(r => results.push({ type: 'USER', len, ...r }))
-          .catch(e => results.push({ type: 'USER', len, ok: false, error: e.message }))
-      );
+  if (cleanUser) {
+    if (hasContent(cleanUser)) {
+      const len = cleanUser.length;
+      try {
+        const r = await addMemory({ content: cleanUser, role: 'user', messageId: `u_${Date.now()}` });
+        results.push({ type: 'USER', len, ...r });
+      } catch (e) {
+        results.push({ type: 'USER', len, ok: false, error: e.message });
+      }
     } else {
       skipped.push({ type: 'USER', reason: 'whitespace-only content' });
     }
   }
 
   // Check if assistant content is meaningful
-  if (lastAssistant) {
-    if (hasContent(lastAssistant)) {
-      const len = lastAssistant.length;
-      promises.push(
-        addMemory({ content: lastAssistant, role: 'assistant', messageId: `a_${Date.now()}` })
-          .then(r => results.push({ type: 'ASSISTANT', len, ...r }))
-          .catch(e => results.push({ type: 'ASSISTANT', len, ok: false, error: e.message }))
-      );
+  if (cleanAssistant) {
+    if (hasContent(cleanAssistant)) {
+      const len = cleanAssistant.length;
+      try {
+        const r = await addMemory({ content: cleanAssistant, role: 'assistant', messageId: `a_${Date.now()}` });
+        results.push({ type: 'ASSISTANT', len, ...r });
+      } catch (e) {
+        results.push({ type: 'ASSISTANT', len, ok: false, error: e.message });
+      }
     } else {
       skipped.push({ type: 'ASSISTANT', reason: 'whitespace-only content' });
     }
   }
-
-  await Promise.all(promises);
 
   // Check if all calls succeeded
   const allSuccess = results.length > 0 && results.every(r => r.ok && !r.error);
