@@ -176,11 +176,11 @@ Enable debug logging to troubleshoot issues:
 # Set environment variable
 export EVERMEM_DEBUG=1
 
-# View logs in real-time
-tail -f /tmp/evermem-debug.log
+# macOS/Linux log file
+# /tmp/evermem-debug.log
 
-# Clear logs
-> /tmp/evermem-debug.log
+# Windows log file
+# %TEMP%\evermem-debug.log
 ```
 
 Run `/evermem:debug` to view recent debug logs directly.

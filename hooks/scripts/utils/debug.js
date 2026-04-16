@@ -11,9 +11,12 @@
  */
 
 import { appendFileSync } from 'fs';
-import { isConfigured } from './config.js';  // This loads .env
+import { join } from 'path';
+import './config.js';  // This loads .env
 
-const DEBUG_LOG_PATH = '/tmp/evermem-debug.log';
+const DEBUG_LOG_PATH = process.platform === 'win32'
+  ? join(process.env.TEMP || process.env.TMP || 'C:/Windows/Temp', 'evermem-debug.log')
+  : '/tmp/evermem-debug.log';
 
 // Check debug flag (after config.js loads .env)
 const DEBUG = process.env.EVERMEM_DEBUG === '1';

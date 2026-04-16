@@ -58,14 +58,17 @@ export function getGroupId() {
   }
   // Use EVERMEM_CWD (set from hook input) or fall back to process.cwd()
   const cwd = process.env.EVERMEM_CWD || process.cwd();
+  const normalizedCwd = process.platform === 'win32'
+    ? cwd.replace(/\\/g, '/').toLowerCase()
+    : cwd;
 
   // Extract project name (last part of path)
-  const projectName = cwd.split('/').filter(Boolean).pop() || 'proj';
+  const projectName = normalizedCwd.split('/').filter(Boolean).pop() || 'proj';
   // Take first 4 chars of project name (lowercase, alphanumeric only)
   const namePrefix = projectName.toLowerCase().replace(/[^a-z0-9]/g, '').substring(0, 4) || 'proj';
 
-  // Hash the full path and take first 5 chars
-  const pathHash = createHash('sha256').update(cwd).digest('hex').substring(0, 5);
+  // Hash the normalized full path and take first 5 chars
+  const pathHash = createHash('sha256').update(normalizedCwd).digest('hex').substring(0, 5);
 
   // Combine: 4 chars name + 5 chars hash = 9 chars
   return `${namePrefix}${pathHash}`;
