@@ -218,9 +218,9 @@ async function main() {
     } else if (error.code === 'ETIMEDOUT') {
       userMessage += `Request timeout - EverMem server is slow or unreachable.`;
     } else if (error.message?.includes('401') || error.message?.includes('Unauthorized')) {
-      userMessage += `Authentication failed. Check your EVERMEM_API_KEY in .env file.`;
+      userMessage += `Authentication failed. Check your EVERMEM_API_KEY or server auth configuration.`;
     } else if (error.message?.includes('404')) {
-      userMessage += `API endpoint not found. Check EVERMEM_BASE_URL in .env file.`;
+      userMessage += `API endpoint not found. Check EVERMEM_API_URL in .env file.`;
     } else if (error.message?.includes('ENOENT')) {
       userMessage += `File not found: ${error.path || 'unknown'}`;
     } else {

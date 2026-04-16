@@ -9,9 +9,13 @@ When the user runs this command:
 node "${CLAUDE_PLUGIN_ROOT}/server/proxy.js" &
 ```
 
-2. Then, construct the Memory Hub URL with the actual API key using Bash:
+2. Then, construct the Memory Hub URL using Bash. If `EVERMEM_API_KEY` is set, include it in the URL. Otherwise, return the plain local URL:
 ```bash
-echo "http://localhost:3456/?key=${EVERMEM_API_KEY}"
+if [ -n "${EVERMEM_API_KEY:-}" ]; then
+	echo "http://localhost:3456/?key=${EVERMEM_API_KEY}"
+else
+	echo "http://localhost:3456/"
+fi
 ```
 
 3. Share a simple message with the user like:

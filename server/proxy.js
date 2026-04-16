@@ -6,7 +6,9 @@
  * working around the browser limitation of not supporting GET requests with body.
  *
  * Usage: node proxy.js
- * Or: EVERMEM_API_KEY=xxx node proxy.js
+ * Optional env:
+ *   EVERMEM_API_URL=http://localhost:8000 node proxy.js
+ *   EVERMEM_API_KEY=xxx node proxy.js
  */
 
 import http from 'http';
@@ -94,6 +96,17 @@ function sendJson(res, status, data) {
   res.end(JSON.stringify(data));
 }
 
+function getRequestAuthHeader(req) {
+  const authHeader = req.headers['authorization'];
+  if (authHeader && authHeader.startsWith('Bearer ')) {
+    return authHeader;
+  }
+  if (process.env.EVERMEM_API_KEY) {
+    return `Bearer ${process.env.EVERMEM_API_KEY}`;
+  }
+  return null;
+}
+
 const server = http.createServer((req, res) => {
   // Handle CORS preflight
   if (req.method === 'OPTIONS') {
@@ -109,7 +122,7 @@ const server = http.createServer((req, res) => {
     req.on('data', chunk => { body += chunk; });
 
     req.on('end', async () => {
-      const authHeader = req.headers['authorization'];
+      const authHeader = getRequestAuthHeader(req);
 
       try {
         const headers = { 'Content-Type': 'application/json' };
@@ -146,15 +159,10 @@ const server = http.createServer((req, res) => {
     return;
   }
 
-  // Get groups for the current API key
+  // Get groups for the current auth context
   if (req.method === 'GET' && req.url === '/api/groups') {
-    const authHeader = req.headers['authorization'];
-    if (!authHeader || !authHeader.startsWith('Bearer ')) {
-      sendJson(res, 401, { error: 'Missing or invalid Authorization header' });
-      return;
-    }
-
-    const apiKey = authHeader.replace('Bearer ', '');
+    const authHeader = getRequestAuthHeader(req);
+    const apiKey = authHeader?.startsWith('Bearer ') ? authHeader.replace('Bearer ', '') : null;
     const keyId = computeKeyId(apiKey);
     const groups = getGroupsForKey(keyId);
 

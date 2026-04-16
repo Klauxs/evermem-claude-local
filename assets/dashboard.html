@@ -545,8 +545,8 @@
       EverMem Memory Hub
     </h1>
     <div class="header-controls">
-      <label style="font-size: 12px; color: #8b949e;">API Key:</label>
-      <input type="password" id="api-key-input" class="api-input" placeholder="Enter your EverMem API key" />
+      <label style="font-size: 12px; color: #8b949e;">API Key (optional):</label>
+      <input type="password" id="api-key-input" class="api-input" placeholder="Enter API key if your server requires auth" />
       <button id="load-btn" class="api-btn" onclick="loadData()">Load</button>
       <button id="refresh-btn" class="refresh-btn" onclick="refreshData()" title="Refresh" style="display: none;">
         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
@@ -555,7 +555,7 @@
         </svg>
       </button>
     </div>
-    <span class="stats" id="stats">Enter API key to load memories</span>
+    <span class="stats" id="stats">Load memories from your configured EverMem server</span>
   </div>
 
   <div id="progress-view">
@@ -563,7 +563,7 @@
       <div id="content">
         <div class="empty-state">
           <h3>Welcome to EverMem Memory Hub</h3>
-          <p>Enter your EverMem API key above to view your memory statistics and timeline.</p>
+          <p>Enter an API key if your server requires authentication. For a local no-auth deployment, leave it blank and click Load.</p>
         </div>
       </div>
     </div>
@@ -599,6 +599,13 @@
     const urlParams = new URLSearchParams(window.location.search);
     const hashParams = new URLSearchParams(window.location.hash.slice(1));
     const keyFromUrl = urlParams.get('key') || urlParams.get('apiKey') || hashParams.get('key') || hashParams.get('apiKey');
+
+    function buildAuthHeaders(headers = {}) {
+      if (!apiKey) {
+        return headers;
+      }
+      return { ...headers, 'Authorization': `Bearer ${apiKey}` };
+    }
 
     // ===== Emoji Mapping =====
     const EMOJI_MAP = {
@@ -752,13 +759,17 @@
     checkProxy();
 
     async function fetchAllMemories() {
-      // 1. Get the list of local groups for this API key
+      // 1. Get the list of local groups for this auth context
       const groupsResponse = await fetch(`${PROXY_URL}/api/groups`, {
-        headers: { 'Authorization': `Bearer ${apiKey}` }
+        headers: buildAuthHeaders()
       });
 
       if (!groupsResponse.ok) {
-        throw new Error(`Failed to load groups: ${groupsResponse.status} ${groupsResponse.statusText}`);
+        const errorData = await groupsResponse.json().catch(() => ({}));
+        if (groupsResponse.status === 401 && !apiKey) {
+          throw new Error('This server requires an API key. Provide EVERMEM_API_KEY or open the Hub URL with ?key=...');
+        }
+        throw new Error(errorData.message || `Failed to load groups: ${groupsResponse.status} ${groupsResponse.statusText}`);
       }
 
       const groupsData = await groupsResponse.json();
@@ -779,10 +790,7 @@
         while (true) {
           const response = await fetch(`${PROXY_URL}/api/v1/memories/get`, {
             method: 'POST',
-            headers: {
-              'Authorization': `Bearer ${apiKey}`,
-              'Content-Type': 'application/json'
-            },
+            headers: buildAuthHeaders({ 'Content-Type': 'application/json' }),
             body: JSON.stringify({
               memory_type: 'episodic_memory',
               filters: { group_id: group.id },
@@ -828,10 +836,6 @@
       }
 
       apiKey = document.getElementById('api-key-input').value.trim();
-      if (!apiKey) {
-        alert('Please enter an API key');
-        return;
-      }
 
       const loadBtn = document.getElementById('load-btn');
       loadBtn.disabled = true;
@@ -840,7 +844,7 @@
       document.getElementById('content').innerHTML = `
         <div class="loading-message">
           <div class="spinner"></div>
-          <p>Loading memories from EverMem Cloud...</p>
+          <p>Loading memories from EverMem...</p>
         </div>
       `;
 
@@ -869,7 +873,7 @@
             <strong>Error loading memories:</strong> ${error.message}
           </div>
           <div class="empty-state">
-            <p>Please check your API key and try again.</p>
+            <p>Please check your server URL, optional API key, and local groups data, then try again.</p>
           </div>
         `;
       } finally {

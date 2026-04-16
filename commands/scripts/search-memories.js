@@ -17,8 +17,8 @@ if (!query) {
 }
 
 if (!isConfigured()) {
-  console.log('Error: EVERMEM_API_KEY not configured');
-  console.log('Set it with: export EVERMEM_API_KEY="your-key"');
+  console.log('Error: EverMem is not configured');
+  console.log('Set EVERMEM_API_KEY for EverMem Cloud, or EVERMEM_API_URL for a custom/local server.');
   process.exit(1);
 }
 

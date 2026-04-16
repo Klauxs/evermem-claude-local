@@ -23,7 +23,7 @@ export async function searchMemories(query, options = {}) {
   const config = getConfig();
 
   if (!config.isConfigured) {
-    throw new Error('EverMem API key not configured');
+    throw new Error('EverMem not configured. Set EVERMEM_API_KEY or EVERMEM_API_URL');
   }
 
   const {
@@ -142,7 +142,7 @@ export async function addMemory(message) {
   const config = getConfig();
 
   if (!config.isConfigured) {
-    throw new Error('EverMem API key not configured');
+    throw new Error('EverMem not configured. Set EVERMEM_API_KEY or EVERMEM_API_URL');
   }
 
   const role = message.role === 'assistant' ? 'assistant' : 'user';
@@ -217,7 +217,7 @@ export async function getMemories(options = {}) {
   const config = getConfig();
 
   if (!config.isConfigured) {
-    throw new Error('EverMem API key not configured');
+    throw new Error('EverMem not configured. Set EVERMEM_API_KEY or EVERMEM_API_URL');
   }
 
   const {

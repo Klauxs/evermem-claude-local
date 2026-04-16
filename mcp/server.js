@@ -56,7 +56,7 @@ async function handleSearch(args) {
   if (!config.isConfigured) {
     return {
       isError: true,
-      content: [{ type: 'text', text: 'EverMem API key not configured. Set EVERMEM_API_KEY environment variable.' }]
+      content: [{ type: 'text', text: 'EverMem is not configured. Set EVERMEM_API_KEY for EverMem Cloud, or EVERMEM_API_URL for a custom/local server.' }]
     };
   }
 
