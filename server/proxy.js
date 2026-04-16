@@ -16,6 +16,7 @@ import { readFileSync, existsSync } from 'fs';
 import { dirname, join } from 'path';
 import { fileURLToPath } from 'url';
 import { createHash } from 'crypto';
+import { getRequiredUserId } from '../hooks/scripts/utils/config.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -107,6 +108,25 @@ function getRequestAuthHeader(req) {
   return null;
 }
 
+function readJsonBody(req) {
+  return new Promise((resolve, reject) => {
+    let body = '';
+    req.on('data', chunk => { body += chunk; });
+    req.on('end', () => {
+      if (!body) {
+        resolve({});
+        return;
+      }
+      try {
+        resolve(JSON.parse(body));
+      } catch (error) {
+        reject(error);
+      }
+    });
+    req.on('error', reject);
+  });
+}
+
 const server = http.createServer((req, res) => {
   // Handle CORS preflight
   if (req.method === 'OPTIONS') {
@@ -118,13 +138,11 @@ const server = http.createServer((req, res) => {
 
   // Forward POST /api/v1/memories/{search,get} to the EverMind API
   if (req.method === 'POST' && (req.url === '/api/v1/memories/search' || req.url === '/api/v1/memories/get')) {
-    let body = '';
-    req.on('data', chunk => { body += chunk; });
-
-    req.on('end', async () => {
+    (async () => {
       const authHeader = getRequestAuthHeader(req);
 
       try {
+        const body = await readJsonBody(req);
         const headers = { 'Content-Type': 'application/json' };
         if (authHeader) {
           headers['Authorization'] = authHeader;
@@ -133,7 +151,7 @@ const server = http.createServer((req, res) => {
         const upstream = await fetch(`${API_BASE}${req.url}`, {
           method: 'POST',
           headers,
-          body
+          body: JSON.stringify(body)
         });
 
         const text = await upstream.text();
@@ -149,7 +167,60 @@ const server = http.createServer((req, res) => {
           message: error.message
         });
       }
-    });
+    })();
+    return;
+  }
+
+  if (req.method === 'POST' && req.url === '/api/hub/memories') {
+    (async () => {
+      const authHeader = getRequestAuthHeader(req);
+
+      try {
+        const userId = getRequiredUserId();
+        const body = await readJsonBody(req);
+        const page = Number.isInteger(body.page) && body.page > 0 ? body.page : 1;
+        const pageSize = Number.isInteger(body.page_size) && body.page_size > 0 ? body.page_size : 100;
+
+        const headers = { 'Content-Type': 'application/json' };
+        if (authHeader) {
+          headers['Authorization'] = authHeader;
+        }
+
+        const upstream = await fetch(`${API_BASE}/api/v1/memories/get`, {
+          method: 'POST',
+          headers,
+          body: JSON.stringify({
+            memory_type: 'episodic_memory',
+            filters: { user_id: userId },
+            page,
+            page_size: pageSize,
+            rank_by: 'timestamp',
+            rank_order: 'desc'
+          })
+        });
+
+        const text = await upstream.text();
+        sendCorsHeaders(res);
+        res.writeHead(upstream.status, {
+          'Content-Type': upstream.headers.get('content-type') || 'application/json'
+        });
+        res.end(text);
+      } catch (error) {
+        if (error.message.includes('EVERMEM_USER_ID is required')) {
+          sendJson(res, 400, {
+            error: 'Missing EVERMEM_USER_ID',
+            message: error.message
+          });
+          return;
+        }
+
+        console.error('Proxy error:', error.message);
+        sendJson(res, 502, {
+          error: 'Upstream request failed',
+          message: error.message
+        });
+      }
+    })();
     return;
   }
 

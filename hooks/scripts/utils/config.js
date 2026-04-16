@@ -47,6 +47,18 @@ export function getUserId() {
 }
 
 /**
+ * Get a stable user ID for features that require explicit user scoping
+ * @returns {string} Explicitly configured user ID
+ */
+export function getRequiredUserId() {
+  const userId = process.env.EVERMEM_USER_ID;
+  if (!userId) {
+    throw new Error('EVERMEM_USER_ID is required for Memory Hub. Configure a stable user ID and try again.');
+  }
+  return userId;
+}
+
+/**
  * Get the group ID for memory operations
  * Uses project working directory as default group
  * Format: {project_name_prefix_4}{path_hash_5} = 9 chars max

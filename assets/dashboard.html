@@ -759,71 +759,37 @@
     checkProxy();
 
     async function fetchAllMemories() {
-      // 1. Get the list of local groups for this auth context
-      const groupsResponse = await fetch(`${PROXY_URL}/api/groups`, {
-        headers: buildAuthHeaders()
-      });
-
-      if (!groupsResponse.ok) {
-        const errorData = await groupsResponse.json().catch(() => ({}));
-        if (groupsResponse.status === 401 && !apiKey) {
-          throw new Error('This server requires an API key. Provide EVERMEM_API_KEY or open the Hub URL with ?key=...');
-        }
-        throw new Error(errorData.message || `Failed to load groups: ${groupsResponse.status} ${groupsResponse.statusText}`);
-      }
-
-      const groupsData = await groupsResponse.json();
-      const groups = groupsData.groups || [];
-
-      if (groups.length === 0) {
-        // No locally-tracked groups → nothing to show. v1 requires a concrete filter
-        // (user_id or group_id), so there is no "fetch everything" path.
-        return { data: { episodes: [] } };
-      }
-
-      // 2. For each group, paginate /api/v1/memories/get
       const allEpisodes = [];
       const PAGE_SIZE = 100;
+      let page = 1;
 
-      for (const group of groups) {
-        let page = 1;
-        while (true) {
-          const response = await fetch(`${PROXY_URL}/api/v1/memories/get`, {
-            method: 'POST',
-            headers: buildAuthHeaders({ 'Content-Type': 'application/json' }),
-            body: JSON.stringify({
-              memory_type: 'episodic_memory',
-              filters: { group_id: group.id },
-              page,
-              page_size: PAGE_SIZE,
-              rank_by: 'timestamp',
-              rank_order: 'desc'
-            })
-          });
+      while (true) {
+        const response = await fetch(`${PROXY_URL}/api/hub/memories`, {
+          method: 'POST',
+          headers: buildAuthHeaders({ 'Content-Type': 'application/json' }),
+          body: JSON.stringify({
+            page,
+            page_size: PAGE_SIZE
+          })
+        });
 
-          if (!response.ok) {
-            if (page === 1) {
-              const errorData = await response.json().catch(() => ({}));
-              // Surface error only for the first failure per group, then skip it
-              console.warn(`Group ${group.id} failed:`, errorData.message || response.status);
-            }
-            break;
+        if (!response.ok) {
+          const errorData = await response.json().catch(() => ({}));
+          if (response.status === 401 && !apiKey) {
+            throw new Error('This server requires an API key. Provide EVERMEM_API_KEY or open the Hub URL with ?key=...');
           }
-
-          const payload = await response.json();
-          const episodes = payload?.data?.episodes || [];
-          if (episodes.length === 0) break;
-
-          // Attach group_id to each episode so the UI can filter/label by project
-          for (const ep of episodes) {
-            if (!ep.group_id) ep.group_id = group.id;
-          }
-          allEpisodes.push(...episodes);
-
-          const total = payload?.data?.total_count ?? Infinity;
-          if (episodes.length < PAGE_SIZE || page * PAGE_SIZE >= total) break;
-          page += 1;
+          throw new Error(errorData.message || `Failed to load memories: ${response.status} ${response.statusText}`);
         }
+
+        const payload = await response.json();
+        const episodes = payload?.data?.episodes || [];
+        if (episodes.length === 0) break;
+
+        allEpisodes.push(...episodes);
+
+        const total = payload?.data?.total_count ?? Infinity;
+        if (episodes.length < PAGE_SIZE || page * PAGE_SIZE >= total) break;
+        page += 1;
       }
 
       return { data: { episodes: allEpisodes } };
@@ -857,7 +823,7 @@
           document.getElementById('content').innerHTML = `
             <div class="empty-state">
               <h3>No Memories Found</h3>
-              <p>Your EverMem account doesn't have any memories yet. Start using Claude Code with the EverMem plugin to build your memory.</p>
+              <p>No episodic memories were found for the configured user.</p>
             </div>
           `;
           document.getElementById('stats').textContent = '0 memories';
@@ -873,7 +839,7 @@
             <strong>Error loading memories:</strong> ${error.message}
           </div>
           <div class="empty-state">
-            <p>Please check your server URL, optional API key, and local groups data, then try again.</p>
+            <p>Please check your proxy server, EVERMEM_USER_ID configuration, and API authentication, then try again.</p>
           </div>
         `;
       } finally {
@@ -893,14 +859,26 @@
 
     function populateProjectFilter() {
       const select = document.getElementById('project-filter');
-      const groups = new Set();
-      memories.forEach(m => { if (m.groupId) groups.add(m.groupId); });
+      const groups = new Map();
+      memories.forEach(memory => {
+        if (!memory.groupId) {
+          return;
+        }
+        const currentLatest = groups.get(memory.groupId);
+        if (!currentLatest || new Date(memory.timestamp) > new Date(currentLatest)) {
+          groups.set(memory.groupId, memory.timestamp);
+        }
+      });
+
+      const sortedGroups = Array.from(groups.entries())
+        .sort((a, b) => new Date(b[1]) - new Date(a[1]))
+        .map(([groupId]) => groupId);
 
       select.innerHTML = '<option value="">All Projects</option>';
-      groups.forEach(g => {
-        const displayName = g.replace(/^claude-code:/, '');
+      sortedGroups.forEach(groupId => {
+        const displayName = groupId.replace(/^claude-code:/, '');
         const option = document.createElement('option');
-        option.value = g;
+        option.value = groupId;
         option.textContent = displayName.length > 40 ? '...' + displayName.slice(-40) : displayName;
         select.appendChild(option);
       });
@@ -971,7 +949,7 @@
           <div class="stat-card">
             <div class="label">Projects</div>
             <div class="value">${stats.uniqueGroups}</div>
-            <div class="trend neutral">Unique workspaces</div>
+            <div class="trend neutral">Groups with memories</div>
           </div>
           <div class="stat-card">
             <div class="label">Active Days</div>

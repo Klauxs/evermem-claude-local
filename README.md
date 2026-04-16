@@ -424,7 +424,7 @@ No AI summarization is used - pure local data extraction for zero latency and no
 | Network error | "Cannot reach EverMem server. Check your internet connection." |
 | Timeout | "EverMem server is slow or unreachable." |
 | 401/Unauthorized | "Authentication failed. Check your EVERMEM_API_KEY." |
-| 404 | "API endpoint not found. Check EVERMEM_BASE_URL." |
+| 404 | "API endpoint not found. Check EVERMEM_API_URL." |
 | Module not found | "Missing dependency. Run: npm install" |
 
 All errors return `continue: true` to ensure session starts normally.

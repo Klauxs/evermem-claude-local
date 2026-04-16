@@ -48,7 +48,7 @@ async function main() {
   }
 
   const config = getConfig();
-  console.log(`✓ API Key: ${config.apiKey.slice(0, 10)}...`);
+  console.log(`✓ API Key: ${config.apiKey ? `${config.apiKey.slice(0, 10)}...` : 'Not configured (using API URL only)'}`);
   console.log(`✓ User ID: ${config.userId}`);
   console.log(`✓ Group ID: ${config.groupId}`);
   console.log(`✓ API URL: ${config.apiBaseUrl}`);

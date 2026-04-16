@@ -3,7 +3,7 @@
  * Handles memory search and storage operations
  */
 
-import { getConfig } from './config.js';
+import { getConfig, getRequiredUserId } from './config.js';
 import { debug, setDebugPrefix } from './debug.js';
 
 // Set debug prefix for this script
@@ -234,6 +234,46 @@ export async function getMemories(options = {}) {
   const requestBody = {
     memory_type: memoryType,
     filters,
+    page,
+    page_size: pageSize,
+    rank_by: 'timestamp',
+    rank_order: 'desc'
+  };
+
+  const response = await fetch(url, {
+    method: 'POST',
+    headers: config.apiKey
+      ? { 'Authorization': `Bearer ${config.apiKey}`, 'Content-Type': 'application/json' }
+      : { 'Content-Type': 'application/json' },
+    body: JSON.stringify(requestBody)
+  });
+
+  if (!response.ok) {
+    const errorText = await response.text();
+    throw new Error(`API error ${response.status}: ${errorText}`);
+  }
+
+  return await response.json();
+}
+
+export async function getMemoriesByUser(options = {}) {
+  const config = getConfig();
+
+  if (!config.isConfigured) {
+    throw new Error('EverMem not configured. Set EVERMEM_API_KEY or EVERMEM_API_URL');
+  }
+
+  const userId = getRequiredUserId();
+  const {
+    page = 1,
+    pageSize = 100,
+    memoryType = 'episodic_memory'
+  } = options;
+
+  const url = `${config.apiBaseUrl}/api/v1/memories/get`;
+  const requestBody = {
+    memory_type: memoryType,
+    filters: { user_id: userId },
     page,
     page_size: pageSize,
     rank_by: 'timestamp',
