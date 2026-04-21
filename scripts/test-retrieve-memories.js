@@ -71,7 +71,7 @@ async function main() {
           ? memory.text.slice(0, 70) + '...'
           : memory.text;
 
-        console.log(`   ${i + 1}. (${relTime}) [${memory.type}]`);
+        console.log(`   ${i + 1}. (${relTime}) [${memory.memoryType}]`);
         console.log(`      "${shortText}"`);
         if (memory.score) {
           console.log(`      Score: ${memory.score.toFixed(3)}`);

@@ -126,6 +126,7 @@ To use the hub, run `/evermem:hub` and follow the instructions.
 |----------|-------------|----------|
 | `EVERMEM_API_KEY` | API key for authenticated EverMem servers | Required for EverMem Cloud; optional for local/custom no-auth deployments |
 | `EVERMEM_API_URL` | Base URL for a custom or local EverMem API server | Optional |
+| `EVERMEM_MEMORY_MODE` | `agent` (default) for Claude Code trajectories, or `episodic` for legacy behavior | Optional |
 
 ### Project-Specific Settings
 

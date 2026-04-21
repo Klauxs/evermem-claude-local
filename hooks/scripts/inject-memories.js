@@ -26,8 +26,10 @@ setDebugPrefix('inject');
 const MIN_WORDS = 3;
 const LOCAL_SCORE_THRESHOLD = 0.1;   // In-project: lenient, keep most results
 const GLOBAL_SCORE_THRESHOLD = 0.5;  // Cross-project: strict, only high relevance
+const SKILL_SCORE_THRESHOLD = 0.35;
 const MAX_LOCAL_MEMORIES = 5;        // Max in-project results
 const MAX_GLOBAL_MEMORIES = 3;       // Max cross-project results
+const MAX_SKILLS = 4;
 
 /**
  * Count words/tokens in a string (multilingual support)
@@ -88,18 +90,18 @@ async function main() {
     }
 
     // Global search + client-side tiered filtering
-    const { localMemories, globalMemories } = await searchAndFilter(prompt);
+    const { localMemories, globalMemories, skillMemories } = await searchAndFilter(prompt);
 
-    if (localMemories.length === 0 && globalMemories.length === 0) {
+    if (localMemories.length === 0 && globalMemories.length === 0 && skillMemories.length === 0) {
       debug('skipped: no relevant memories above thresholds');
       process.exit(0);
     }
 
     // Build context for Claude
-    const context = buildContext({ localMemories, globalMemories });
+    const context = buildContext({ localMemories, globalMemories, skillMemories });
 
     // Build display message for user
-    const displayMessage = buildDisplayMessage(localMemories, globalMemories);
+    const displayMessage = buildDisplayMessage(localMemories, globalMemories, skillMemories);
 
     // Output JSON with systemMessage (user display) and additionalContext (for Claude)
     const output = {
@@ -150,6 +152,7 @@ function readStdin() {
  */
 async function searchAndFilter(prompt) {
   const config = getConfig();
+  const agentMode = config.memoryMode === 'agent';
 
   let allMemories = [];
   try {
@@ -157,25 +160,32 @@ async function searchAndFilter(prompt) {
     const apiResponse = await searchMemories(prompt, {
       topK: 15,
       retrieveMethod: 'hybrid',
-      memoryTypes: ['episodic_memory']
+      memoryTypes: agentMode ? ['agent_memory'] : ['episodic_memory']
     });
     allMemories = transformSearchResults(apiResponse);
     debug('global search results:', { total: allMemories.length });
   } catch (error) {
     debug('search error:', error.message);
-    return { localMemories: [], globalMemories: [] };
+    return { localMemories: [], globalMemories: [], skillMemories: [] };
   }
 
-  // Split by group_id: current project vs other projects
+  // Split by project scope and memory type
   const currentGroupId = config.groupId;
   const localRaw = [];
   const globalRaw = [];
+  const skillRaw = [];
 
   for (const m of allMemories) {
-    if (m.metadata.groupId === currentGroupId) {
+    if (agentMode && m.memoryType === 'agent_skill') {
+      skillRaw.push(m);
+    } else if (agentMode && isCurrentProjectAgentCase(m, currentGroupId)) {
       localRaw.push(m);
     } else {
-      globalRaw.push(m);
+      if (!agentMode && m.metadata.groupId === currentGroupId) {
+        localRaw.push(m);
+      } else {
+        globalRaw.push(m);
+      }
     }
   }
 
@@ -188,19 +198,33 @@ async function searchAndFilter(prompt) {
     .filter(m => m.score >= GLOBAL_SCORE_THRESHOLD)
     .slice(0, MAX_GLOBAL_MEMORIES);
 
+  const skillMemories = skillRaw
+    .filter(m => m.score >= SKILL_SCORE_THRESHOLD)
+    .slice(0, MAX_SKILLS);
+
   debug('filtered:', {
     local: { raw: localRaw.length, filtered: localMemories.length, threshold: LOCAL_SCORE_THRESHOLD },
-    global: { raw: globalRaw.length, filtered: globalMemories.length, threshold: GLOBAL_SCORE_THRESHOLD }
+    global: { raw: globalRaw.length, filtered: globalMemories.length, threshold: GLOBAL_SCORE_THRESHOLD },
+    skills: { raw: skillRaw.length, filtered: skillMemories.length, threshold: SKILL_SCORE_THRESHOLD }
   });
 
-  return { localMemories, globalMemories };
+  return { localMemories, globalMemories, skillMemories };
+}
+
+function isCurrentProjectAgentCase(memory, currentGroupId) {
+  if (memory.memoryType !== 'agent_case') {
+    return false;
+  }
+
+  const sessionId = memory.sessionId || '';
+  return sessionId.startsWith(`${currentGroupId}__`);
 }
 
 /**
  * Build display message for user (shown via systemMessage)
  */
-function buildDisplayMessage(localMemories, globalMemories = []) {
-  const total = localMemories.length + globalMemories.length;
+function buildDisplayMessage(localMemories, globalMemories = [], skillMemories = []) {
+  const total = localMemories.length + globalMemories.length + skillMemories.length;
   const header = `📝 Memory Retrieved (${total}):`;
   const lines = [header];
 
@@ -224,16 +248,27 @@ function buildDisplayMessage(localMemories, globalMemories = []) {
     }
   }
 
+  if (skillMemories.length > 0) {
+    lines.push(`  ── reusable skills ──`);
+    for (const memory of skillMemories) {
+      const score = memory.score ? memory.score.toFixed(2) : '0.00';
+      const title = memory.subject ||
+        (memory.text.length > 50 ? memory.text.slice(0, 50) + '...' : memory.text);
+      lines.push(`  • [${score}] [skill] ${title}`);
+    }
+  }
+
   return lines.join('\n');
 }
 
 /**
  * Build context string for Claude with tiered local/global sections
  */
-function buildContext({ localMemories, globalMemories }) {
+function buildContext({ localMemories, globalMemories, skillMemories = [] }) {
   const lines = [];
   lines.push('<relevant-memories>');
   lines.push('IMPORTANT: Memories are ordered by recency. When conflicts exist, prefer MORE RECENT information.');
+  lines.push('Agent cases are prior execution examples. Agent skills are reusable patterns distilled from multiple trajectories.');
   lines.push('');
 
   // Current project memories (high confidence)
@@ -246,7 +281,18 @@ function buildContext({ localMemories, globalMemories }) {
       const timeStr = formatTimestamp(m.timestamp);
       const typeTag = m.memoryType !== 'episodic_memory'
         ? ` [${m.memoryType}]` : '';
-      lines.push(`[${timeStr}]${typeTag} ${m.text}`);
+      const title = m.subject ? `${m.subject}: ` : '';
+      lines.push(`[${timeStr}]${typeTag} ${title}${m.text}`);
+      lines.push('');
+    }
+  }
+
+  if (skillMemories.length > 0) {
+    lines.push('## Reusable Agent Skills:');
+    for (const m of skillMemories) {
+      const title = m.subject || 'Unnamed skill';
+      const description = m.metadata.description ? `\nDescription: ${m.metadata.description}` : '';
+      lines.push(`- ${title}${description}\nPattern: ${m.text}`);
       lines.push('');
     }
   }
@@ -261,7 +307,8 @@ function buildContext({ localMemories, globalMemories }) {
       const timeStr = formatTimestamp(m.timestamp);
       const source = m.metadata.groupId || 'unknown-project';
       const score = m.score ? m.score.toFixed(2) : '0.00';
-      lines.push(`[${timeStr}] [source: ${source}] [score: ${score}] ${m.text}`);
+      const title = m.subject ? `${m.subject}: ` : '';
+      lines.push(`[${timeStr}] [source: ${source}] [score: ${score}] ${title}${m.text}`);
       lines.push('');
     }
     lines.push('Note: Cross-project memories may not directly apply. Verify relevance before using.');

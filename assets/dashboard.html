@@ -759,9 +759,10 @@
     checkProxy();
 
     async function fetchAllMemories() {
-      const allEpisodes = [];
+      const allMemories = [];
       const PAGE_SIZE = 100;
       let page = 1;
+      let memoryMode = 'episodic';
 
       while (true) {
         const response = await fetch(`${PROXY_URL}/api/hub/memories`, {
@@ -782,17 +783,18 @@
         }
 
         const payload = await response.json();
-        const episodes = payload?.data?.episodes || [];
-        if (episodes.length === 0) break;
+        const items = payload?.data?.memories || payload?.data?.episodes || [];
+        memoryMode = payload?.data?.memory_mode || memoryMode;
+        if (items.length === 0) break;
 
-        allEpisodes.push(...episodes);
+        allMemories.push(...items);
 
         const total = payload?.data?.total_count ?? Infinity;
-        if (episodes.length < PAGE_SIZE || page * PAGE_SIZE >= total) break;
+        if (items.length < PAGE_SIZE || page * PAGE_SIZE >= total) break;
         page += 1;
       }
 
-      return { data: { episodes: allEpisodes } };
+      return { data: { memories: allMemories, memory_mode: memoryMode } };
     }
 
     async function loadData() {
@@ -823,7 +825,7 @@
           document.getElementById('content').innerHTML = `
             <div class="empty-state">
               <h3>No Memories Found</h3>
-              <p>No episodic memories were found for the configured user.</p>
+              <p>No memories were found for the configured user in the current memory mode.</p>
             </div>
           `;
           document.getElementById('stats').textContent = '0 memories';
@@ -909,30 +911,49 @@
     }
 
     function transformApiResponse(apiResponse) {
-      const episodes = apiResponse?.data?.episodes;
-      if (!Array.isArray(episodes)) return [];
+      const items = apiResponse?.data?.memories || apiResponse?.data?.episodes;
+      if (!Array.isArray(items)) return [];
 
-      return episodes.map((ep, i) => {
-        // v1 get → content in ep.episode; v1 search → content in ep.summary.
-        // Accept both so this transform works regardless of upstream endpoint.
-        const content = ep.episode || ep.summary || ep.content || '';
-        const timestamp = ep.timestamp || ep.create_time || new Date().toISOString();
+      return items.map((item, i) => {
+        const content = item.content || item.episode || item.summary || '';
+        const timestamp = item.timestamp || item.create_time || new Date().toISOString();
         const date = new Date(timestamp);
 
         return {
-          id: ep.id || ep.message_id || `mem_${i}`,
+          id: item.id || item.message_id || `mem_${i}`,
           content,
-          subject: ep.subject || '',
-          groupId: ep.group_id || '',
-          participants: ep.participants || [],
+          subject: item.subject || '',
+          groupId: item.group_id || '',
+          rawGroupId: item.raw_group_id || '',
+          sessionId: item.session_id || '',
+          participants: item.participants || item.metadata?.participants || [],
           timestamp,
           date: formatLocalDate(date),
           time: date.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' }),
-          score: ep.score || 0,
-          memoryType: ep.memory_type,
-          summary: ep.summary || ''
+          score: item.score || 0,
+          memoryType: item.memory_type || 'episodic_memory',
+          summary: item.summary || '',
+          metadata: item.metadata || {}
         };
       }).filter(m => m.content);
+    }
+
+    function getMemoryTypeLabel(memory) {
+      if (memory.memoryType === 'agent_case') return 'Case';
+      if (memory.memoryType === 'agent_skill') return 'Skill';
+      return 'Memory';
+    }
+
+    function getMemoryTypeColor(memory) {
+      if (memory.memoryType === 'agent_case') return '#FFC53D';
+      if (memory.memoryType === 'agent_skill') return '#f0883e';
+      return '#58a6ff';
+    }
+
+    function getProjectDisplayName(memory) {
+      if (!memory.groupId) return '';
+      if (memory.groupId === 'agent-skills') return 'skill-library';
+      return memory.groupId.replace(/^claude-code:/, '');
     }
 
     function renderDashboard() {
@@ -1309,7 +1330,7 @@
         header.innerHTML = `
           <span class="day-date">${dateDisplay}</span>
           ${date === todayStr ? '<span class="day-badge">Today</span>' : ''}
-          <span class="day-stats">${dayMemories.length} ${dayMemories.length === 1 ? 'memory' : 'memories'}</span>
+          <span class="day-stats">${dayMemories.length} ${dayMemories.length === 1 ? 'item' : 'items'}</span>
         `;
         dayDiv.appendChild(header);
 
@@ -1323,16 +1344,22 @@
 
           const displaySubject = memory.subject || (memory.content.length > 40 ? memory.content.slice(0, 40) + '...' : memory.content);
           const displayContent = memory.content.length > 150 ? memory.content.slice(0, 150) + '...' : memory.content;
-          const projectName = memory.groupId ? memory.groupId.replace(/^claude-code:/, '') : '';
+          const projectName = getProjectDisplayName(memory);
           const emoji = getMemoryEmoji(memory.subject || memory.content);
+          const typeLabel = getMemoryTypeLabel(memory);
+          const typeColor = getMemoryTypeColor(memory);
 
           card.innerHTML = `
             <div class="memory-card-header">
               <span class="memory-emoji">${emoji}</span>
+              <span class="memory-type-dot" style="background: ${typeColor};"></span>
               <span class="memory-label">${escapeHtml(displaySubject)}</span>
               <span class="memory-time">${memory.time}</span>
             </div>
-            ${projectName ? `<div class="memory-project">\uD83D\uDCC1 ${escapeHtml(projectName)}</div>` : ''}
+            <div style="display: flex; gap: 8px; align-items: center; margin-bottom: 6px; flex-wrap: wrap;">
+              <span style="font-size: 10px; color: ${typeColor}; text-transform: uppercase; letter-spacing: 0.5px; font-weight: 600;">${typeLabel}</span>
+              ${projectName ? `<div class="memory-project">\uD83D\uDCC1 ${escapeHtml(projectName)}</div>` : ''}
+            </div>
             <div class="memory-content">${escapeHtml(displayContent)}</div>
           `;
           cardsDiv.appendChild(card);
@@ -1344,13 +1371,14 @@
     }
 
     function openModal(memory) {
-      const projectName = memory.groupId ? memory.groupId.replace(/^claude-code:/, '') : '';
+      const projectName = getProjectDisplayName(memory);
       const dateStr = new Date(memory.timestamp).toLocaleDateString('en-US', {
         weekday: 'long', year: 'numeric', month: 'long', day: 'numeric', hour: '2-digit', minute: '2-digit'
       });
+      const typeLabel = getMemoryTypeLabel(memory);
 
-      document.getElementById('modal-title').textContent = memory.subject || 'Memory';
-      document.getElementById('modal-meta').innerHTML = `${dateStr}${projectName ? ` · <span style="font-family: monospace;">${escapeHtml(projectName)}</span>` : ''}`;
+      document.getElementById('modal-title').textContent = memory.subject || typeLabel;
+      document.getElementById('modal-meta').innerHTML = `${escapeHtml(typeLabel)} · ${dateStr}${projectName ? ` · <span style="font-family: monospace;">${escapeHtml(projectName)}</span>` : ''}`;
       document.getElementById('modal-content').textContent = memory.content;
 
       document.getElementById('modal-overlay').classList.add('visible');

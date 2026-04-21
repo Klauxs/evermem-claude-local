@@ -25,10 +25,11 @@ if (!isConfigured()) {
 async function main() {
   try {
     const config = getConfig();
-    console.log('Searching EverMem Cloud...\n');
+    console.log('Searching EverMem...\n');
     console.log(`Query: "${query}"`);
     console.log(`User: ${config.userId}`);
     console.log(`Group: ${config.groupId}`);
+    console.log(`Mode: ${config.memoryMode}`);
     console.log('');
 
     const apiResponse = await searchMemories(query, {
@@ -58,8 +59,13 @@ async function main() {
       const time = new Date(m.timestamp).toLocaleTimeString();
 
       console.log('');
-      console.log(`${i + 1}. [Score: ${score}] ${date} ${time}`);
+      console.log(`${i + 1}. [${m.memoryType}] [Score: ${score}] ${date} ${time}`);
       console.log('-'.repeat(70));
+
+      if (m.subject) {
+        console.log(`Subject: ${m.subject}`);
+        console.log('');
+      }
 
       // Word wrap the content
       const words = m.text.split(' ');

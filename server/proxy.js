@@ -16,7 +16,7 @@ import { readFileSync, existsSync } from 'fs';
 import { dirname, join } from 'path';
 import { fileURLToPath } from 'url';
 import { createHash } from 'crypto';
-import { getRequiredUserId } from '../hooks/scripts/utils/config.js';
+import { getRequiredUserId, getMemoryMode } from '../hooks/scripts/utils/config.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -108,6 +108,156 @@ function getRequestAuthHeader(req) {
   return null;
 }
 
+function buildUpstreamHeaders(authHeader) {
+  const headers = { 'Content-Type': 'application/json' };
+  if (authHeader) {
+    headers['Authorization'] = authHeader;
+  }
+  return headers;
+}
+
+async function postUpstreamJson(path, authHeader, body) {
+  const upstream = await fetch(`${API_BASE}${path}`, {
+    method: 'POST',
+    headers: buildUpstreamHeaders(authHeader),
+    body: JSON.stringify(body)
+  });
+
+  const text = await upstream.text();
+  let data;
+  try {
+    data = JSON.parse(text);
+  } catch {
+    data = { raw: text };
+  }
+
+  if (!upstream.ok) {
+    const error = new Error(data?.message || `Upstream error: ${upstream.status}`);
+    error.status = upstream.status;
+    error.payload = data;
+    throw error;
+  }
+
+  return data;
+}
+
+async function fetchAllMemoryPages({ authHeader, memoryType, filters }) {
+  const pageSize = 100;
+  const items = [];
+  let page = 1;
+
+  while (true) {
+    const payload = await postUpstreamJson('/api/v1/memories/get', authHeader, {
+      memory_type: memoryType,
+      filters,
+      page,
+      page_size: pageSize,
+      rank_by: 'timestamp',
+      rank_order: 'desc'
+    });
+
+    const data = payload?.data || {};
+    const chunk = memoryType === 'agent_case'
+      ? (data.agent_cases || [])
+      : memoryType === 'agent_skill'
+        ? (data.agent_skills || [])
+        : (data.episodes || []);
+
+    if (!Array.isArray(chunk) || chunk.length === 0) {
+      break;
+    }
+
+    items.push(...chunk);
+
+    const total = data.total_count ?? items.length;
+    if (chunk.length < pageSize || page * pageSize >= total) {
+      break;
+    }
+
+    page += 1;
+  }
+
+  return items;
+}
+
+function normalizeTimestamp(value) {
+  if (!value) return new Date().toISOString();
+  if (typeof value === 'number') return new Date(value).toISOString();
+  const parsed = new Date(value);
+  return Number.isNaN(parsed.getTime()) ? new Date().toISOString() : parsed.toISOString();
+}
+
+function deriveProjectGroupId(item) {
+  const sessionId = item?.session_id || '';
+  if (sessionId.includes('__')) {
+    return sessionId.split('__')[0];
+  }
+  return item?.group_id || '';
+}
+
+function normalizeHubMemory(item, memoryType) {
+  const timestamp = normalizeTimestamp(item.timestamp);
+  const projectGroupId = deriveProjectGroupId(item);
+
+  if (memoryType === 'agent_case') {
+    return {
+      id: item.id,
+      content: item.approach || item.task_intent || '',
+      subject: item.task_intent || '',
+      summary: item.key_insight || '',
+      group_id: projectGroupId,
+      raw_group_id: item.group_id || '',
+      session_id: item.session_id || '',
+      timestamp,
+      score: item.score || item.quality_score || 0,
+      memory_type: 'agent_case',
+      metadata: {
+        quality_score: item.quality_score,
+        parent_id: item.parent_id,
+        parent_type: item.parent_type,
+        key_insight: item.key_insight
+      }
+    };
+  }
+
+  if (memoryType === 'agent_skill') {
+    return {
+      id: item.id,
+      content: item.content || item.description || item.name || '',
+      subject: item.name || item.description || 'Reusable skill',
+      summary: item.description || '',
+      group_id: projectGroupId || 'agent-skills',
+      raw_group_id: item.group_id || '',
+      session_id: item.session_id || '',
+      timestamp,
+      score: item.score || item.confidence || 0,
+      memory_type: 'agent_skill',
+      metadata: {
+        confidence: item.confidence,
+        maturity_score: item.maturity_score,
+        cluster_id: item.cluster_id,
+        description: item.description
+      }
+    };
+  }
+
+  return {
+    id: item.id || item.message_id,
+    content: item.episode || item.summary || item.content || '',
+    subject: item.subject || '',
+    summary: item.summary || '',
+    group_id: item.group_id || '',
+    raw_group_id: item.group_id || '',
+    session_id: item.session_id || '',
+    timestamp,
+    score: item.score || 0,
+    memory_type: item.memory_type || 'episodic_memory',
+    metadata: {
+      participants: item.participants || []
+    }
+  };
+}
+
 function readJsonBody(req) {
   return new Promise((resolve, reject) => {
     let body = '';
@@ -177,34 +327,44 @@ const server = http.createServer((req, res) => {
 
       try {
         const userId = getRequiredUserId();
+        const memoryMode = getMemoryMode();
         const body = await readJsonBody(req);
         const page = Number.isInteger(body.page) && body.page > 0 ? body.page : 1;
         const pageSize = Number.isInteger(body.page_size) && body.page_size > 0 ? body.page_size : 100;
+        const filters = { user_id: userId };
 
-        const headers = { 'Content-Type': 'application/json' };
-        if (authHeader) {
-          headers['Authorization'] = authHeader;
+        let normalizedMemories = [];
+        if (memoryMode === 'agent') {
+          const [cases, skills] = await Promise.all([
+            fetchAllMemoryPages({ authHeader, memoryType: 'agent_case', filters }),
+            fetchAllMemoryPages({ authHeader, memoryType: 'agent_skill', filters })
+          ]);
+
+          normalizedMemories = [
+            ...cases.map(item => normalizeHubMemory(item, 'agent_case')),
+            ...skills.map(item => normalizeHubMemory(item, 'agent_skill'))
+          ];
+        } else {
+          const episodes = await fetchAllMemoryPages({ authHeader, memoryType: 'episodic_memory', filters });
+          normalizedMemories = episodes.map(item => normalizeHubMemory(item, 'episodic_memory'));
         }
 
-        const upstream = await fetch(`${API_BASE}/api/v1/memories/get`, {
-          method: 'POST',
-          headers,
-          body: JSON.stringify({
-            memory_type: 'episodic_memory',
-            filters: { user_id: userId },
+        normalizedMemories.sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp));
+
+        const totalCount = normalizedMemories.length;
+        const start = (page - 1) * pageSize;
+        const pagedMemories = normalizedMemories.slice(start, start + pageSize);
+
+        sendJson(res, 200, {
+          data: {
+            memories: pagedMemories,
+            count: pagedMemories.length,
+            total_count: totalCount,
             page,
             page_size: pageSize,
-            rank_by: 'timestamp',
-            rank_order: 'desc'
-          })
+            memory_mode: memoryMode
+          }
         });
-
-        const text = await upstream.text();
-        sendCorsHeaders(res);
-        res.writeHead(upstream.status, {
-          'Content-Type': upstream.headers.get('content-type') || 'application/json'
-        });
-        res.end(text);
       } catch (error) {
         if (error.message.includes('EVERMEM_USER_ID is required')) {
           sendJson(res, 400, {

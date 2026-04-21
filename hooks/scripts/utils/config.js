@@ -95,6 +95,16 @@ export function getApiBaseUrl() {
 }
 
 /**
+ * Get the memory mode for EverMem operations.
+ * Defaults to agent memory for Claude Code trajectories.
+ * @returns {'agent'|'episodic'}
+ */
+export function getMemoryMode() {
+  const value = (process.env.EVERMEM_MEMORY_MODE || 'agent').toLowerCase();
+  return value === 'episodic' ? 'episodic' : 'agent';
+}
+
+/**
  * Check if the plugin is properly configured
  * @returns {boolean} True if API key or custom API URL is set
  */
@@ -126,6 +136,7 @@ export function getConfig() {
     userId: getUserId(),
     groupId: getGroupId(),
     apiBaseUrl: getApiBaseUrl(),
+    memoryMode: getMemoryMode(),
     isConfigured: isConfigured()
   };
 }

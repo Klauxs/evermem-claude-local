@@ -131,21 +131,40 @@ async function main() {
   try {
     const groupId = getGroupId();
 
+    const agentMode = config.memoryMode === 'agent';
+
     // Fetch memories (API returns old to new, we'll reverse and take latest)
-    const response = await getMemories({ pageSize: PAGE_SIZE });
+    const response = await getMemories({
+      pageSize: PAGE_SIZE,
+      memoryType: agentMode ? 'agent_case' : 'episodic_memory'
+    });
     const memories = transformGetMemoriesResults(response);
+    let skillMemories = [];
+
+    if (agentMode) {
+      const skillResponse = await getMemories({
+        pageSize: 20,
+        memoryType: 'agent_skill'
+      });
+      skillMemories = transformGetMemoriesResults(skillResponse);
+    }
 
     // Get last session summary from local storage
     const lastSession = getLastSessionSummary(groupId);
 
-    if (memories.length === 0 && !lastSession) {
+    if (memories.length === 0 && skillMemories.length === 0 && !lastSession) {
       // No memories and no last session, skip
       console.log(JSON.stringify({ continue: true }));
       return;
     }
 
-    // Take the most recent memories
-    const recentMemories = memories.slice(0, RECENT_MEMORY_COUNT);
+    const recentMemories = agentMode
+      ? memories.filter(m => (m.sessionId || '').startsWith(`${groupId}__`)).slice(0, RECENT_MEMORY_COUNT)
+      : memories.slice(0, RECENT_MEMORY_COUNT);
+    const recentGlobalCases = agentMode
+      ? memories.filter(m => !(m.sessionId || '').startsWith(`${groupId}__`)).slice(0, 3)
+      : [];
+    const recentSkills = agentMode ? skillMemories.slice(0, 3) : [];
 
     // Build context message for Claude (no AI summarization)
     let contextParts = [];
@@ -162,7 +181,20 @@ async function main() {
         const date = new Date(m.timestamp).toLocaleDateString();
         return `[${i + 1}] (${date}) ${m.subject}\n${m.text}`;
       }).join('\n\n---\n\n');
-      contextParts.push(`Recent memories (${recentMemories.length}):\n\n${memoriesText}`);
+      contextParts.push(`${agentMode ? 'Recent agent cases' : 'Recent memories'} (${recentMemories.length}):\n\n${memoriesText}`);
+    }
+
+    if (recentSkills.length > 0) {
+      const skillsText = recentSkills.map((m, i) => `[${i + 1}] ${m.subject}\n${m.text}`).join('\n\n---\n\n');
+      contextParts.push(`Reusable skills (${recentSkills.length}):\n\n${skillsText}`);
+    }
+
+    if (recentGlobalCases.length > 0) {
+      const globalText = recentGlobalCases.map((m, i) => {
+        const date = new Date(m.timestamp).toLocaleDateString();
+        return `[${i + 1}] (${date}) ${m.subject}\n${m.text}`;
+      }).join('\n\n---\n\n');
+      contextParts.push(`Cross-project agent cases (${recentGlobalCases.length}):\n\n${globalText}`);
     }
 
     const contextMessage = `<session-context>\n${contextParts.join('\n\n')}\n</session-context>`;
@@ -183,7 +215,11 @@ async function main() {
           const subj = m.subject || '';
           return subj.length > 15 ? subj.substring(0, 15) + '..' : subj;
         }).join(', ');
-        displayOutput += ` | ${recentMemories.length} memories: ${memorySubjects}`;
+        displayOutput += ` | ${recentMemories.length} ${agentMode ? 'cases' : 'memories'}: ${memorySubjects}`;
+      }
+
+      if (recentSkills.length > 0) {
+        displayOutput += ` | ${recentSkills.length} skills`;
       }
     } else if (recentMemories.length > 0) {
       // No last session, show recent memories with subjects
@@ -191,7 +227,10 @@ async function main() {
         const subj = m.subject || '';
         return subj.length > 20 ? subj.substring(0, 20) + '..' : subj;
       }).join(', ');
-      displayOutput = `💡 EverMem: ${recentMemories.length} memories: ${memorySubjects}`;
+      displayOutput = `💡 EverMem: ${recentMemories.length} ${agentMode ? 'cases' : 'memories'}: ${memorySubjects}`;
+      if (recentSkills.length > 0) {
+        displayOutput += ` | ${recentSkills.length} skills`;
+      }
     } else {
       displayOutput = `💡 EverMem: Ready`;
     }

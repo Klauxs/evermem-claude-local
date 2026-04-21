@@ -81,15 +81,17 @@ async function handleSearch(args) {
     }
 
     // Format as compact table (token-efficient like claude-mem)
-    const header = '| # | Score | Date | Summary |';
-    const separator = '|---|-------|------|---------|';
+    const header = '| # | Type | Score | Date | Summary |';
+    const separator = '|---|------|-------|------|---------|';
 
     const rows = memories.map((mem, i) => {
       const score = Math.round(mem.score * 100);
       const date = formatRelativeDate(mem.timestamp);
-      // Use full subject field
+      const type = mem.memoryType === 'agent_skill'
+        ? 'skill'
+        : (mem.memoryType === 'agent_case' ? 'case' : 'memory');
       const summary = (mem.subject || mem.text.substring(0, 150)).replace(/\|/g, '/').replace(/\n/g, ' ');
-      return `| ${i + 1} | ${score}% | ${date} | ${summary} |`;
+      return `| ${i + 1} | ${type} | ${score}% | ${date} | ${summary} |`;
     });
 
     const table = [header, separator, ...rows].join('\n');
