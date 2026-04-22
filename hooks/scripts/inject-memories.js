@@ -24,12 +24,12 @@ import { debug, setDebugPrefix } from './utils/debug.js';
 setDebugPrefix('inject');
 
 const MIN_WORDS = 3;
-const LOCAL_SCORE_THRESHOLD = 0.1;   // In-project: lenient, keep most results
+const LOCAL_SCORE_THRESHOLD = 0.3;   // In-project: lenient, keep most results
 const GLOBAL_SCORE_THRESHOLD = 0.5;  // Cross-project: strict, only high relevance
 const SKILL_SCORE_THRESHOLD = 0.35;
-const MAX_LOCAL_MEMORIES = 5;        // Max in-project results
+const MAX_LOCAL_MEMORIES = 3;        // Max in-project results
 const MAX_GLOBAL_MEMORIES = 3;       // Max cross-project results
-const MAX_SKILLS = 4;
+const MAX_SKILLS = 3;
 
 /**
  * Count words/tokens in a string (multilingual support)
@@ -160,7 +160,7 @@ async function searchAndFilter(prompt) {
     const apiResponse = await searchMemories(prompt, {
       topK: 15,
       retrieveMethod: 'hybrid',
-      memoryTypes: agentMode ? ['agent_memory'] : ['episodic_memory']
+      memoryTypes: agentMode ? ['agent_memory', 'episodic_memory'] : ['episodic_memory']
     });
     allMemories = transformSearchResults(apiResponse);
     debug('global search results:', { total: allMemories.length });
@@ -178,14 +178,13 @@ async function searchAndFilter(prompt) {
   for (const m of allMemories) {
     if (agentMode && m.memoryType === 'agent_skill') {
       skillRaw.push(m);
-    } else if (agentMode && isCurrentProjectAgentCase(m, currentGroupId)) {
+    } else if (agentMode && m.memoryType === 'agent_case') {
+      // Skip agent cases entirely; we only inject skills + episodic in agent mode.
+      continue;
+    } else if (m.metadata.groupId === currentGroupId) {
       localRaw.push(m);
     } else {
-      if (!agentMode && m.metadata.groupId === currentGroupId) {
-        localRaw.push(m);
-      } else {
-        globalRaw.push(m);
-      }
+      globalRaw.push(m);
     }
   }
 
@@ -209,15 +208,6 @@ async function searchAndFilter(prompt) {
   });
 
   return { localMemories, globalMemories, skillMemories };
-}
-
-function isCurrentProjectAgentCase(memory, currentGroupId) {
-  if (memory.memoryType !== 'agent_case') {
-    return false;
-  }
-
-  const sessionId = memory.sessionId || '';
-  return sessionId.startsWith(`${currentGroupId}__`);
 }
 
 /**

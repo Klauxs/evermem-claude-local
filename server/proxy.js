@@ -335,14 +335,17 @@ const server = http.createServer((req, res) => {
 
         let normalizedMemories = [];
         if (memoryMode === 'agent') {
-          const [cases, skills] = await Promise.all([
+          // In agent mode, also include legacy episodic memory alongside agent cases & skills.
+          const [cases, skills, episodes] = await Promise.all([
             fetchAllMemoryPages({ authHeader, memoryType: 'agent_case', filters }),
-            fetchAllMemoryPages({ authHeader, memoryType: 'agent_skill', filters })
+            fetchAllMemoryPages({ authHeader, memoryType: 'agent_skill', filters }),
+            fetchAllMemoryPages({ authHeader, memoryType: 'episodic_memory', filters })
           ]);
 
           normalizedMemories = [
             ...cases.map(item => normalizeHubMemory(item, 'agent_case')),
-            ...skills.map(item => normalizeHubMemory(item, 'agent_skill'))
+            ...skills.map(item => normalizeHubMemory(item, 'agent_skill')),
+            ...episodes.map(item => normalizeHubMemory(item, 'episodic_memory'))
           ];
         } else {
           const episodes = await fetchAllMemoryPages({ authHeader, memoryType: 'episodic_memory', filters });

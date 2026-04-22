@@ -17,7 +17,11 @@ function buildHeaders(config) {
 }
 
 function getDefaultSearchMemoryTypes(config) {
-  return config.memoryMode === 'agent' ? ['agent_memory'] : ['episodic_memory'];
+  // In agent mode, recall both agent memory (cases + skills) and legacy episodic memory.
+  // In episodic mode, only recall episodic memory.
+  return config.memoryMode === 'agent'
+    ? ['agent_memory', 'episodic_memory']
+    : ['episodic_memory'];
 }
 
 function normalizeTimestamp(value) {
@@ -35,7 +39,7 @@ function normalizeTimestamp(value) {
  * @param {Object} options - Additional options
  * @param {number} options.topK - Max results (default: 10)
  * @param {string} options.retrieveMethod - Search method: keyword|vector|hybrid|agentic (default: 'hybrid')
- * @param {string[]} options.memoryTypes - Memory types (default: ['episodic_memory'])
+ * @param {string[]} options.memoryTypes - Memory types (default: based on EVERMEM_MEMORY_MODE; agent mode includes both agent_memory and episodic_memory)
  * @returns {Promise<Object>} Raw API response with _debug envelope
  */
 export async function searchMemories(query, options = {}) {
