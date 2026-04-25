@@ -131,21 +131,37 @@ async function main() {
   try {
     const groupId = getGroupId();
 
-    // Fetch memories (API returns old to new, we'll reverse and take latest)
-    const response = await getMemories({ pageSize: PAGE_SIZE });
+    const agentMode = config.memoryMode === 'agent';
+
+    // Fetch recent episodic memories (in agent mode we still inject episodic, not cases)
+    const response = await getMemories({
+      pageSize: PAGE_SIZE,
+      memoryType: 'episodic_memory'
+    });
     const memories = transformGetMemoriesResults(response);
+    let skillMemories = [];
+
+    if (agentMode) {
+      const skillResponse = await getMemories({
+        pageSize: 20,
+        memoryType: 'agent_skill'
+      });
+      skillMemories = transformGetMemoriesResults(skillResponse);
+    }
 
     // Get last session summary from local storage
     const lastSession = getLastSessionSummary(groupId);
 
-    if (memories.length === 0 && !lastSession) {
+    if (memories.length === 0 && skillMemories.length === 0 && !lastSession) {
       // No memories and no last session, skip
       console.log(JSON.stringify({ continue: true }));
       return;
     }
 
-    // Take the most recent memories
-    const recentMemories = memories.slice(0, RECENT_MEMORY_COUNT);
+    const recentMemories = memories
+      .filter(m => !groupId || m.metadata?.groupId === groupId)
+      .slice(0, RECENT_MEMORY_COUNT);
+    const recentSkills = agentMode ? skillMemories.slice(0, 3) : [];
 
     // Build context message for Claude (no AI summarization)
     let contextParts = [];
@@ -163,6 +179,11 @@ async function main() {
         return `[${i + 1}] (${date}) ${m.subject}\n${m.text}`;
       }).join('\n\n---\n\n');
       contextParts.push(`Recent memories (${recentMemories.length}):\n\n${memoriesText}`);
+    }
+
+    if (recentSkills.length > 0) {
+      const skillsText = recentSkills.map((m, i) => `[${i + 1}] ${m.subject}\n${m.text}`).join('\n\n---\n\n');
+      contextParts.push(`Reusable skills (${recentSkills.length}):\n\n${skillsText}`);
     }
 
     const contextMessage = `<session-context>\n${contextParts.join('\n\n')}\n</session-context>`;
@@ -185,6 +206,10 @@ async function main() {
         }).join(', ');
         displayOutput += ` | ${recentMemories.length} memories: ${memorySubjects}`;
       }
+
+      if (recentSkills.length > 0) {
+        displayOutput += ` | ${recentSkills.length} skills`;
+      }
     } else if (recentMemories.length > 0) {
       // No last session, show recent memories with subjects
       const memorySubjects = recentMemories.slice(0, 3).map(m => {
@@ -192,6 +217,9 @@ async function main() {
         return subj.length > 20 ? subj.substring(0, 20) + '..' : subj;
       }).join(', ');
       displayOutput = `💡 EverMem: ${recentMemories.length} memories: ${memorySubjects}`;
+      if (recentSkills.length > 0) {
+        displayOutput += ` | ${recentSkills.length} skills`;
+      }
     } else {
       displayOutput = `💡 EverMem: Ready`;
     }
@@ -218,9 +246,9 @@ async function main() {
     } else if (error.code === 'ETIMEDOUT') {
       userMessage += `Request timeout - EverMem server is slow or unreachable.`;
     } else if (error.message?.includes('401') || error.message?.includes('Unauthorized')) {
-      userMessage += `Authentication failed. Check your EVERMEM_API_KEY in .env file.`;
+      userMessage += `Authentication failed. Check your EVERMEM_API_KEY or server auth configuration.`;
     } else if (error.message?.includes('404')) {
-      userMessage += `API endpoint not found. Check EVERMEM_BASE_URL in .env file.`;
+      userMessage += `API endpoint not found. Check EVERMEM_API_URL in .env file.`;
     } else if (error.message?.includes('ENOENT')) {
       userMessage += `File not found: ${error.path || 'unknown'}`;
     } else {

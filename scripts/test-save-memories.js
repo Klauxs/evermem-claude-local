@@ -10,7 +10,7 @@
  */
 
 import { getConfig, isConfigured } from '../hooks/scripts/utils/config.js';
-import { addMemory } from '../hooks/scripts/utils/evermem-api.js';
+import { addMemory, addAgentTrajectory, flushAgentMemories } from '../hooks/scripts/utils/evermem-api.js';
 
 // Sample conversations that might happen in Claude Code
 const TEST_CONVERSATIONS = [
@@ -48,7 +48,7 @@ async function main() {
   }
 
   const config = getConfig();
-  console.log(`✓ API Key: ${config.apiKey.slice(0, 10)}...`);
+  console.log(`✓ API Key: ${config.apiKey ? `${config.apiKey.slice(0, 10)}...` : 'Not configured (using API URL only)'}`);
   console.log(`✓ User ID: ${config.userId}`);
   console.log(`✓ Group ID: ${config.groupId}`);
   console.log(`✓ API URL: ${config.apiBaseUrl}`);
@@ -62,6 +62,39 @@ async function main() {
     const conv = TEST_CONVERSATIONS[i];
     console.log(`\n📝 Conversation ${i + 1}/${TEST_CONVERSATIONS.length}`);
     console.log(`   User: "${conv.user.slice(0, 50)}..."`);
+
+    if (config.memoryMode === 'agent') {
+      try {
+        const timestamp = Date.now();
+        const sessionId = `${config.groupId}__test-save`;
+        const result = await addAgentTrajectory({
+          sessionId,
+          messages: [
+            {
+              role: 'user',
+              timestamp,
+              content: conv.user,
+              sender_id: config.userId,
+              sender_name: config.userId
+            },
+            {
+              role: 'assistant',
+              timestamp: timestamp + 1,
+              content: conv.assistant,
+              sender_id: 'claude-assistant',
+              sender_name: 'Claude'
+            }
+          ]
+        });
+        const flush = await flushAgentMemories({ sessionId });
+        console.log(`   ✓ Agent trajectory saved (add: ${result.status}, flush: ${flush.response?.data?.status || 'unknown'})`);
+        successCount += 2;
+      } catch (error) {
+        console.log(`   ❌ Agent trajectory failed: ${error.message}`);
+        failCount += 2;
+      }
+      continue;
+    }
 
     // Save user message
     try {

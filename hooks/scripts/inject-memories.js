@@ -15,7 +15,7 @@
  * 6. Inject context for Claude (via additionalContext)
  */
 
-import { isConfigured } from './utils/config.js';
+import { isConfigured, getConfig } from './utils/config.js';
 import { searchMemories, transformSearchResults } from './utils/evermem-api.js';
 import { formatRelativeTime } from './utils/mock-store.js';
 import { debug, setDebugPrefix } from './utils/debug.js';
@@ -24,8 +24,12 @@ import { debug, setDebugPrefix } from './utils/debug.js';
 setDebugPrefix('inject');
 
 const MIN_WORDS = 3;
-const MAX_MEMORIES = 5;
-const MIN_SCORE = 0.1;  // Only show memories with relevance score above this threshold
+const LOCAL_SCORE_THRESHOLD = 0.3;   // In-project: lenient, keep most results
+const GLOBAL_SCORE_THRESHOLD = 0.5;  // Cross-project: strict, only high relevance
+const SKILL_SCORE_THRESHOLD = 0.35;
+const MAX_LOCAL_MEMORIES = 3;        // Max in-project results
+const MAX_GLOBAL_MEMORIES = 3;       // Max cross-project results
+const MAX_SKILLS = 3;
 
 /**
  * Count words/tokens in a string (multilingual support)
@@ -85,43 +89,19 @@ async function main() {
       process.exit(0);
     }
 
-    // Search memories from EverMem Cloud
-    let memories = [];
-    let apiResponse = null;
-    try {
-      debug('searching memories for prompt:', prompt.slice(0, 100) + (prompt.length > 100 ? '...' : ''));
-      apiResponse = await searchMemories(prompt, {
-        topK: 15,
-        retrieveMethod: 'hybrid'
-      });
-      memories = transformSearchResults(apiResponse);
-      debug("memories:", memories);
-      debug('search results:', { total: memories.length, memories: memories.map(m => ({ score: m.score, subject: m.subject })) });
-    } catch (error) {
-      // Silent on API errors - don't block user workflow
-      debug('search error:', error.message);
+    // Global search + client-side tiered filtering
+    const { localMemories, globalMemories, skillMemories } = await searchAndFilter(prompt);
+
+    if (localMemories.length === 0 && globalMemories.length === 0 && skillMemories.length === 0) {
+      debug('skipped: no relevant memories above thresholds');
       process.exit(0);
     }
-
-    // Filter by minimum score threshold
-    const relevantMemories = memories.filter(m => m.score >= MIN_SCORE);
-    debug('filtered memories:', { total: relevantMemories.length, minScore: MIN_SCORE });
-
-    // No relevant memories above threshold - silently exit (this is normal)
-    if (relevantMemories.length === 0) {
-      debug('skipped: no relevant memories above threshold');
-      process.exit(0);
-    }
-
-    // Take top memories
-    const selectedMemories = relevantMemories.slice(0, MAX_MEMORIES);
-    debug('selected memories:', selectedMemories.map(m => ({ score: m.score, subject: m.subject, timestamp: m.timestamp })));
 
     // Build context for Claude
-    const context = buildContext(selectedMemories);
+    const context = buildContext({ localMemories, globalMemories, skillMemories });
 
     // Build display message for user
-    const displayMessage = buildDisplayMessage(selectedMemories);
+    const displayMessage = buildDisplayMessage(localMemories, globalMemories, skillMemories);
 
     // Output JSON with systemMessage (user display) and additionalContext (for Claude)
     const output = {
@@ -166,73 +146,175 @@ function readStdin() {
 }
 
 /**
- * Build display message for user (shown via systemMessage)
- * @param {Object[]} memories - Selected memories
- * @returns {string}
+ * Single global search + client-side tiered filtering.
+ * All memories are fetched in one API call, then split by group_id
+ * with different score thresholds for local vs cross-project results.
  */
-function buildDisplayMessage(memories) {
-  const header = `📝 Memory Retrieved (${memories.length}):`;
+async function searchAndFilter(prompt) {
+  const config = getConfig();
+  const agentMode = config.memoryMode === 'agent';
 
+  let allMemories = [];
+  try {
+    debug('searching memories for prompt:', prompt.slice(0, 100) + (prompt.length > 100 ? '...' : ''));
+    const apiResponse = await searchMemories(prompt, {
+      topK: 15,
+      retrieveMethod: 'hybrid',
+      memoryTypes: agentMode ? ['agent_memory', 'episodic_memory'] : ['episodic_memory']
+    });
+    allMemories = transformSearchResults(apiResponse);
+    debug('global search results:', { total: allMemories.length });
+  } catch (error) {
+    debug('search error:', error.message);
+    return { localMemories: [], globalMemories: [], skillMemories: [] };
+  }
+
+  // Split by project scope and memory type
+  const currentGroupId = config.groupId;
+  const localRaw = [];
+  const globalRaw = [];
+  const skillRaw = [];
+
+  for (const m of allMemories) {
+    if (agentMode && m.memoryType === 'agent_skill') {
+      skillRaw.push(m);
+    } else if (agentMode && m.memoryType === 'agent_case') {
+      // Skip agent cases entirely; we only inject skills + episodic in agent mode.
+      continue;
+    } else if (m.metadata.groupId === currentGroupId) {
+      localRaw.push(m);
+    } else {
+      globalRaw.push(m);
+    }
+  }
+
+  // Apply different score thresholds
+  const localMemories = localRaw
+    .filter(m => m.score >= LOCAL_SCORE_THRESHOLD)
+    .slice(0, MAX_LOCAL_MEMORIES);
+
+  const globalMemories = globalRaw
+    .filter(m => m.score >= GLOBAL_SCORE_THRESHOLD)
+    .slice(0, MAX_GLOBAL_MEMORIES);
+
+  const skillMemories = skillRaw
+    .filter(m => m.score >= SKILL_SCORE_THRESHOLD)
+    .slice(0, MAX_SKILLS);
+
+  debug('filtered:', {
+    local: { raw: localRaw.length, filtered: localMemories.length, threshold: LOCAL_SCORE_THRESHOLD },
+    global: { raw: globalRaw.length, filtered: globalMemories.length, threshold: GLOBAL_SCORE_THRESHOLD },
+    skills: { raw: skillRaw.length, filtered: skillMemories.length, threshold: SKILL_SCORE_THRESHOLD }
+  });
+
+  return { localMemories, globalMemories, skillMemories };
+}
+
+/**
+ * Build display message for user (shown via systemMessage)
+ */
+function buildDisplayMessage(localMemories, globalMemories = [], skillMemories = []) {
+  const total = localMemories.length + globalMemories.length + skillMemories.length;
+  const header = `📝 Memory Retrieved (${total}):`;
   const lines = [header];
 
-  for (const memory of memories) {
+  for (const memory of localMemories) {
     const relTime = formatRelativeTime(memory.timestamp);
     const score = memory.score ? memory.score.toFixed(2) : '0.00';
-    // Use subject as title if available, otherwise truncate text
-    const title = memory.subject
-      ? memory.subject
-      : (memory.text.length > 60 ? memory.text.slice(0, 60) + '...' : memory.text);
+    const title = memory.subject ||
+      (memory.text.length > 60 ? memory.text.slice(0, 60) + '...' : memory.text);
     lines.push(`  • [${score}] (${relTime}) ${title}`);
+  }
+
+  if (globalMemories.length > 0) {
+    lines.push(`  ── cross-project ──`);
+    for (const memory of globalMemories) {
+      const relTime = formatRelativeTime(memory.timestamp);
+      const score = memory.score ? memory.score.toFixed(2) : '0.00';
+      const source = memory.metadata.groupId || 'other';
+      const title = memory.subject ||
+        (memory.text.length > 50 ? memory.text.slice(0, 50) + '...' : memory.text);
+      lines.push(`  • [${score}] (${relTime}) [${source}] ${title}`);
+    }
+  }
+
+  if (skillMemories.length > 0) {
+    lines.push(`  ── reusable skills ──`);
+    for (const memory of skillMemories) {
+      const score = memory.score ? memory.score.toFixed(2) : '0.00';
+      const title = memory.subject ||
+        (memory.text.length > 50 ? memory.text.slice(0, 50) + '...' : memory.text);
+      lines.push(`  • [${score}] [skill] ${title}`);
+    }
   }
 
   return lines.join('\n');
 }
 
 /**
- * Build context string for Claude
- * Memories are sorted by timestamp (most recent first) to prioritize recent context
- * @param {Object[]} memories - Selected memories
- * @returns {string}
+ * Build context string for Claude with tiered local/global sections
  */
-function buildContext(memories) {
+function buildContext({ localMemories, globalMemories, skillMemories = [] }) {
   const lines = [];
-
-  // Sort by timestamp descending (most recent first)
-  const sortedMemories = [...memories].sort((a, b) => {
-    const timeA = a.timestamp ? new Date(a.timestamp).getTime() : 0;
-    const timeB = b.timestamp ? new Date(b.timestamp).getTime() : 0;
-    return timeB - timeA;
-  });
-
   lines.push('<relevant-memories>');
-  lines.push('The following memories from past sessions are relevant to the user\'s current task:');
-  lines.push('');
-  lines.push('IMPORTANT: Memories are ordered by recency (most recent first). When there are conflicts or updates between memories, prefer the MORE RECENT information as it likely reflects the latest decisions, code changes, or user preferences.');
+  lines.push('IMPORTANT: Memories are ordered by recency. When conflicts exist, prefer MORE RECENT information.');
+  lines.push('Agent cases are prior execution examples. Agent skills are reusable patterns distilled from multiple trajectories.');
   lines.push('');
 
-  for (const memory of sortedMemories) {
-    // Format timestamp for context
-    const timeStr = memory.timestamp
-      ? new Date(memory.timestamp).toLocaleString('zh-CN', {
-          year: 'numeric',
-          month: '2-digit',
-          day: '2-digit',
-          weekday: 'short',
-          hour: '2-digit',
-          minute: '2-digit',
-          timeZone: 'UTC'
-        }) + ' UTC'
-      : 'Unknown time';
-
-    lines.push(`[${timeStr}]`);
-    lines.push(memory.text);
-    lines.push('');
+  // Current project memories (high confidence)
+  if (localMemories.length > 0) {
+    lines.push('## Current Project Memories:');
+    const sorted = [...localMemories].sort((a, b) =>
+      new Date(b.timestamp) - new Date(a.timestamp)
+    );
+    for (const m of sorted) {
+      const timeStr = formatTimestamp(m.timestamp);
+      const typeTag = m.memoryType !== 'episodic_memory'
+        ? ` [${m.memoryType}]` : '';
+      const title = m.subject ? `${m.subject}: ` : '';
+      lines.push(`[${timeStr}]${typeTag} ${title}${m.text}`);
+      lines.push('');
+    }
   }
 
-  lines.push('Use this context to inform your response. The user has already seen these memories displayed.');
-  lines.push('</relevant-memories>');
+  if (skillMemories.length > 0) {
+    lines.push('## Reusable Agent Skills:');
+    for (const m of skillMemories) {
+      const title = m.subject || 'Unnamed skill';
+      const description = m.metadata.description ? `\nDescription: ${m.metadata.description}` : '';
+      lines.push(`- ${title}${description}\nPattern: ${m.text}`);
+      lines.push('');
+    }
+  }
 
+  // Cross-project memories (labeled with source, caution advised)
+  if (globalMemories.length > 0) {
+    lines.push('## Cross-Project Memories (from other projects, use with caution):');
+    const sorted = [...globalMemories].sort((a, b) =>
+      new Date(b.timestamp) - new Date(a.timestamp)
+    );
+    for (const m of sorted) {
+      const timeStr = formatTimestamp(m.timestamp);
+      const source = m.metadata.groupId || 'unknown-project';
+      const score = m.score ? m.score.toFixed(2) : '0.00';
+      const title = m.subject ? `${m.subject}: ` : '';
+      lines.push(`[${timeStr}] [source: ${source}] [score: ${score}] ${title}${m.text}`);
+      lines.push('');
+    }
+    lines.push('Note: Cross-project memories may not directly apply. Verify relevance before using.');
+  }
+
+  lines.push('</relevant-memories>');
   return lines.join('\n');
+}
+
+function formatTimestamp(ts) {
+  if (!ts) return 'Unknown time';
+  return new Date(ts).toLocaleString('zh-CN', {
+    year: 'numeric', month: '2-digit', day: '2-digit',
+    weekday: 'short', hour: '2-digit', minute: '2-digit',
+    timeZone: 'UTC'
+  }) + ' UTC';
 }
 
 // Run

@@ -47,6 +47,18 @@ export function getUserId() {
 }
 
 /**
+ * Get a stable user ID for features that require explicit user scoping
+ * @returns {string} Explicitly configured user ID
+ */
+export function getRequiredUserId() {
+  const userId = process.env.EVERMEM_USER_ID;
+  if (!userId) {
+    throw new Error('EVERMEM_USER_ID is required for Memory Hub. Configure a stable user ID and try again.');
+  }
+  return userId;
+}
+
+/**
  * Get the group ID for memory operations
  * Uses project working directory as default group
  * Format: {project_name_prefix_4}{path_hash_5} = 9 chars max
@@ -58,14 +70,17 @@ export function getGroupId() {
   }
   // Use EVERMEM_CWD (set from hook input) or fall back to process.cwd()
   const cwd = process.env.EVERMEM_CWD || process.cwd();
+  const normalizedCwd = process.platform === 'win32'
+    ? cwd.replace(/\\/g, '/').toLowerCase()
+    : cwd;
 
   // Extract project name (last part of path)
-  const projectName = cwd.split('/').filter(Boolean).pop() || 'proj';
+  const projectName = normalizedCwd.split('/').filter(Boolean).pop() || 'proj';
   // Take first 4 chars of project name (lowercase, alphanumeric only)
   const namePrefix = projectName.toLowerCase().replace(/[^a-z0-9]/g, '').substring(0, 4) || 'proj';
 
-  // Hash the full path and take first 5 chars
-  const pathHash = createHash('sha256').update(cwd).digest('hex').substring(0, 5);
+  // Hash the normalized full path and take first 5 chars
+  const pathHash = createHash('sha256').update(normalizedCwd).digest('hex').substring(0, 5);
 
   // Combine: 4 chars name + 5 chars hash = 9 chars
   return `${namePrefix}${pathHash}`;
@@ -80,11 +95,21 @@ export function getApiBaseUrl() {
 }
 
 /**
+ * Get the memory mode for EverMem operations.
+ * Defaults to agent memory for Claude Code trajectories.
+ * @returns {'agent'|'episodic'}
+ */
+export function getMemoryMode() {
+  const value = (process.env.EVERMEM_MEMORY_MODE || 'agent').toLowerCase();
+  return value === 'episodic' ? 'episodic' : 'agent';
+}
+
+/**
  * Check if the plugin is properly configured
- * @returns {boolean} True if API key is set
+ * @returns {boolean} True if API key or custom API URL is set
  */
 export function isConfigured() {
-  return !!getApiKey();
+  return !!getApiKey() || !!process.env.EVERMEM_API_URL;
 }
 
 /**
@@ -111,6 +136,7 @@ export function getConfig() {
     userId: getUserId(),
     groupId: getGroupId(),
     apiBaseUrl: getApiBaseUrl(),
+    memoryMode: getMemoryMode(),
     isConfigured: isConfigured()
   };
 }

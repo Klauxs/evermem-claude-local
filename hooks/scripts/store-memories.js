@@ -4,24 +4,419 @@ process.on('uncaughtException', () => process.exit(0));
 process.on('unhandledRejection', () => process.exit(0));
 
 import { readFileSync, existsSync } from 'fs';
-import { isConfigured } from './utils/config.js';  // This loads .env
-import { addMemory } from './utils/evermem-api.js';
+import { isConfigured, getConfig } from './utils/config.js';
+import { addMemory, addAgentTrajectory, flushAgentMemories } from './utils/evermem-api.js';
 import { debug, setDebugPrefix } from './utils/debug.js';
 
-// Set debug prefix for this script
 setDebugPrefix('store');
 
-try {
-  let input = '';
-  for await (const chunk of process.stdin) {
-    input += chunk;
+function hasContent(text) {
+  return text && text.trim().length > 0;
+}
+
+function stripInjectedContext(text) {
+  if (!text) return text;
+  return text
+    .replace(/<relevant-memories>[\s\S]*?<\/relevant-memories>/g, '')
+    .replace(/<session-context>[\s\S]*?<\/session-context>/g, '')
+    .trim();
+}
+
+function readStdin() {
+  return new Promise((resolve, reject) => {
+    let input = '';
+    process.stdin.setEncoding('utf8');
+    process.stdin.on('data', chunk => {
+      input += chunk;
+    });
+    process.stdin.on('end', () => resolve(input));
+    process.stdin.on('error', reject);
+  });
+}
+
+async function readTranscriptWithRetry(path, maxRetries = 5, delayMs = 100) {
+  for (let attempt = 1; attempt <= maxRetries; attempt++) {
+    const content = readFileSync(path, 'utf8');
+    const lines = content.trim().split('\n');
+
+    let isComplete = false;
+    try {
+      const lastLine = JSON.parse(lines[lines.length - 1]);
+      isComplete = lastLine.type === 'system' && lastLine.subtype === 'turn_duration';
+    } catch {}
+
+    debug(`read attempt ${attempt}:`, {
+      totalLines: lines.length,
+      isComplete,
+      lastLineType: (() => {
+        try {
+          const entry = JSON.parse(lines[lines.length - 1]);
+          return entry.subtype ? `${entry.type}/${entry.subtype}` : entry.type;
+        } catch {
+          return 'unknown';
+        }
+      })()
+    });
+
+    if (isComplete) {
+      return lines;
+    }
+
+    if (attempt < maxRetries) {
+      await new Promise(resolve => setTimeout(resolve, delayMs));
+    }
   }
 
+  return readFileSync(path, 'utf8').trim().split('\n');
+}
+
+function getCurrentTurnRange(lines) {
+  const turnEndIndex = lines.length;
+  let turnStartIndex = 0;
+
+  for (let i = lines.length - 1; i >= 0; i--) {
+    try {
+      const entry = JSON.parse(lines[i]);
+      if (entry.type === 'system' && entry.subtype === 'turn_duration') {
+        turnStartIndex = i + 1;
+        break;
+      }
+    } catch {}
+  }
+
+  return { turnStartIndex, turnEndIndex };
+}
+
+function contentItemsToText(content) {
+  if (!content) return '';
+  if (typeof content === 'string') return content;
+  if (!Array.isArray(content)) return '';
+
+  const texts = [];
+  for (const block of content) {
+    if (!block) continue;
+    if (block.type === 'text' && block.text) {
+      texts.push(block.text);
+    } else if (typeof block.text === 'string') {
+      texts.push(block.text);
+    } else if (typeof block.content === 'string') {
+      texts.push(block.content);
+    }
+  }
+  return texts.join('\n\n').trim();
+}
+
+function getEntryTimestampMs(entry, fallback = Date.now()) {
+  if (!entry?.timestamp) {
+    return fallback;
+  }
+
+  if (typeof entry.timestamp === 'number') {
+    return entry.timestamp;
+  }
+
+  const parsed = new Date(entry.timestamp).getTime();
+  return Number.isNaN(parsed) ? fallback : parsed;
+}
+
+function normalizeToolResultContent(content) {
+  if (typeof content === 'string') {
+    return stripInjectedContext(content);
+  }
+
+  if (Array.isArray(content)) {
+    const text = contentItemsToText(content);
+    if (text) {
+      return stripInjectedContext(text);
+    }
+  }
+
+  if (!content) {
+    return '';
+  }
+
+  try {
+    return JSON.stringify(content);
+  } catch {
+    return String(content);
+  }
+}
+
+function extractLastTurnText(lines) {
+  const { turnStartIndex, turnEndIndex } = getCurrentTurnRange(lines);
+  const userTexts = [];
+  const assistantTexts = [];
+
+  for (let i = turnStartIndex; i < turnEndIndex; i++) {
+    try {
+      const entry = JSON.parse(lines[i]);
+      const content = entry.message?.content;
+
+      if (entry.type === 'user') {
+        if (typeof content === 'string') {
+          userTexts.push(content);
+        } else if (Array.isArray(content)) {
+          for (const block of content) {
+            if (block.type === 'text' && block.text) {
+              userTexts.push(block.text);
+            }
+          }
+        }
+      }
+
+      if (entry.type === 'assistant') {
+        if (Array.isArray(content)) {
+          for (const block of content) {
+            if (block.type === 'text' && block.text) {
+              assistantTexts.push(block.text);
+            }
+          }
+        } else if (typeof content === 'string') {
+          assistantTexts.push(content);
+        }
+      }
+    } catch {}
+  }
+
+  return {
+    user: userTexts.join('\n\n'),
+    assistant: assistantTexts.join('\n\n')
+  };
+}
+
+function extractAgentTurnMessages(lines, config) {
+  const { turnStartIndex, turnEndIndex } = getCurrentTurnRange(lines);
+  const messages = [];
+
+  for (let i = turnStartIndex; i < turnEndIndex; i++) {
+    let entry;
+    try {
+      entry = JSON.parse(lines[i]);
+    } catch {
+      continue;
+    }
+
+    const timestamp = getEntryTimestampMs(entry, Date.now() + i);
+    const content = entry.message?.content;
+
+    if (entry.type === 'user') {
+      if (typeof content === 'string') {
+        const text = stripInjectedContext(content);
+        if (hasContent(text)) {
+          messages.push({
+            role: 'user',
+            timestamp,
+            content: text,
+            sender_id: config.userId,
+            sender_name: config.userId
+          });
+        }
+        continue;
+      }
+
+      if (Array.isArray(content)) {
+        const userText = stripInjectedContext(contentItemsToText(content.filter(block => block?.type === 'text')));
+        if (hasContent(userText)) {
+          messages.push({
+            role: 'user',
+            timestamp,
+            content: userText,
+            sender_id: config.userId,
+            sender_name: config.userId
+          });
+        }
+
+        for (const block of content) {
+          if (block?.type !== 'tool_result' || !block.tool_use_id) {
+            continue;
+          }
+
+          const toolText = normalizeToolResultContent(block.content);
+          if (!hasContent(toolText)) {
+            continue;
+          }
+
+          messages.push({
+            role: 'tool',
+            timestamp,
+            tool_call_id: block.tool_use_id,
+            content: toolText,
+            sender_id: block.name || 'tool',
+            sender_name: block.name || 'tool'
+          });
+        }
+      }
+    }
+
+    if (entry.type === 'assistant') {
+      if (typeof content === 'string') {
+        const text = stripInjectedContext(content);
+        if (hasContent(text)) {
+          messages.push({
+            role: 'assistant',
+            timestamp,
+            content: text,
+            sender_id: 'claude-assistant',
+            sender_name: 'Claude'
+          });
+        }
+        continue;
+      }
+
+      if (Array.isArray(content)) {
+        const textBlocks = [];
+        const toolCalls = [];
+
+        for (const block of content) {
+          if (block?.type === 'text' && block.text) {
+            textBlocks.push({ type: 'text', text: block.text });
+          }
+
+          if (block?.type === 'tool_use' && block.id && block.name) {
+            toolCalls.push({
+              id: block.id,
+              type: 'function',
+              function: {
+                name: block.name,
+                arguments: JSON.stringify(block.input || {})
+              }
+            });
+          }
+        }
+
+        const text = stripInjectedContext(contentItemsToText(textBlocks));
+        if (hasContent(text) || toolCalls.length > 0) {
+          messages.push({
+            role: 'assistant',
+            timestamp,
+            content: hasContent(text) ? text : '',
+            tool_calls: toolCalls.length > 0 ? toolCalls : undefined,
+            sender_id: 'claude-assistant',
+            sender_name: 'Claude'
+          });
+        }
+      }
+    }
+  }
+
+  return messages;
+}
+
+function buildAgentSessionId(config, rawSessionId) {
+  return `${config.groupId}__${rawSessionId || 'default'}`;
+}
+
+async function saveEpisodicTurn(lines) {
+  const lastTurn = extractLastTurnText(lines);
+  const cleanUser = stripInjectedContext(lastTurn.user);
+  const cleanAssistant = stripInjectedContext(lastTurn.assistant);
+  const results = [];
+  const skipped = [];
+
+  if (cleanUser) {
+    if (hasContent(cleanUser)) {
+      const len = cleanUser.length;
+      try {
+        const result = await addMemory({ content: cleanUser, role: 'user', messageId: `u_${Date.now()}` });
+        results.push({ type: 'USER', len, ...result });
+      } catch (error) {
+        results.push({ type: 'USER', len, ok: false, error: error.message });
+      }
+    } else {
+      skipped.push({ type: 'USER', reason: 'whitespace-only content' });
+    }
+  }
+
+  if (cleanAssistant) {
+    if (hasContent(cleanAssistant)) {
+      const len = cleanAssistant.length;
+      try {
+        const result = await addMemory({ content: cleanAssistant, role: 'assistant', messageId: `a_${Date.now()}` });
+        results.push({ type: 'ASSISTANT', len, ...result });
+      } catch (error) {
+        results.push({ type: 'ASSISTANT', len, ok: false, error: error.message });
+      }
+    } else {
+      skipped.push({ type: 'ASSISTANT', reason: 'whitespace-only content' });
+    }
+  }
+
+  const allSuccess = results.length > 0 && results.every(result => result.ok && !result.error);
+
+  if (allSuccess) {
+    const details = results.map(result => `${result.type.toLowerCase()}: ${result.len}`).join(', ');
+    let output = `💾 Memory saved (${results.length}) [${details}]`;
+    if (skipped.length > 0) {
+      output += `\n⏭️ Skipped: ${skipped.map(item => `${item.type} (${item.reason})`).join(', ')}`;
+    }
+    return { systemMessage: output };
+  }
+
+  if (results.length === 0 && skipped.length > 0) {
+    return {
+      systemMessage: `⏭️ EverMem: No content to save\n${skipped.map(item => `  • ${item.type}: ${item.reason}`).join('\n')}`
+    };
+  }
+
+  let output = '💾 EverMem: Save failed\n';
+  for (const result of results) {
+    if (result.error) {
+      output += `${result.type}: ERROR - ${result.error}\n`;
+    } else if (!result.ok) {
+      output += `${result.type}: FAILED (${result.status})\n`;
+      output += `Request: ${JSON.stringify(result.body, null, 2)}\n`;
+      output += `Response: ${JSON.stringify(result.response, null, 2)}\n`;
+    }
+  }
+  if (skipped.length > 0) {
+    output += `⏭️ Skipped: ${skipped.map(item => `${item.type} (${item.reason})`).join(', ')}\n`;
+  }
+  return { systemMessage: output };
+}
+
+async function saveAgentTurn(lines, config, hookInput) {
+  const agentMessages = extractAgentTurnMessages(lines, config);
+  const sessionId = buildAgentSessionId(config, hookInput.session_id || hookInput.sessionId);
+
+  debug('agent messages extracted:', {
+    count: agentMessages.length,
+    sessionId,
+    roles: agentMessages.map(msg => msg.role)
+  });
+
+  if (agentMessages.length === 0) {
+    return null;
+  }
+
+  const addResult = await addAgentTrajectory({ sessionId, messages: agentMessages });
+  const flushResult = addResult.ok
+    ? await flushAgentMemories({ sessionId })
+    : null;
+
+  if (addResult.ok && flushResult?.ok) {
+    const toolCallCount = agentMessages.reduce((count, msg) => count + (msg.tool_calls?.length || 0), 0);
+    const flushStatus = flushResult.response?.data?.status || 'unknown';
+    return {
+      systemMessage: `💾 Agent memory saved (${agentMessages.length} msgs, ${toolCallCount} tools, flush: ${flushStatus})`
+    };
+  }
+
+  let output = '💾 EverMem: Agent save failed\n';
+  if (!addResult.ok) {
+    output += `add: ${JSON.stringify(addResult.response, null, 2)}\n`;
+  }
+  if (flushResult && !flushResult.ok) {
+    output += `flush: ${JSON.stringify(flushResult.response, null, 2)}\n`;
+  }
+  return { systemMessage: output };
+}
+
+try {
+  const input = await readStdin();
   const hookInput = JSON.parse(input);
   debug('hookInput:', hookInput);
-  const transcriptPath = hookInput.transcript_path;
 
-  // Set cwd from hook input for config.getGroupId()
+  const transcriptPath = hookInput.transcript_path;
   if (hookInput.cwd) {
     process.env.EVERMEM_CWD = hookInput.cwd;
   }
@@ -30,269 +425,25 @@ try {
     process.exit(0);
   }
 
-  /**
-   * Read transcript file with retry logic
-   * Waits for turn_duration marker which indicates the turn is complete
-   */
-  async function readTranscriptWithRetry(path, maxRetries = 5, delayMs = 100) {
-    for (let attempt = 1; attempt <= maxRetries; attempt++) {
-      const content = readFileSync(path, 'utf8');
-      const lines = content.trim().split('\n');
-
-      // Check if the last line is turn_duration (indicates turn is complete)
-      let isComplete = false;
-      try {
-        const lastLine = JSON.parse(lines[lines.length - 1]);
-        isComplete = lastLine.type === 'system' && lastLine.subtype === 'turn_duration';
-      } catch {}
-
-      debug(`read attempt ${attempt}:`, {
-        totalLines: lines.length,
-        isComplete,
-        lastLineType: (() => {
-          try {
-            const e = JSON.parse(lines[lines.length - 1]);
-            return e.subtype ? `${e.type}/${e.subtype}` : e.type;
-          } catch { return 'unknown'; }
-        })()
-      });
-
-      if (isComplete) {
-        return lines;
-      }
-
-      if (attempt < maxRetries) {
-        debug(`turn not complete, waiting ${delayMs}ms before retry...`);
-        await new Promise(resolve => setTimeout(resolve, delayMs));
-      }
-    }
-
-    // Return whatever we have after max retries
-    debug('max retries reached, proceeding with current content');
-    const content = readFileSync(path, 'utf8');
-    return content.trim().split('\n');
-  }
-
+  const config = getConfig();
   const lines = await readTranscriptWithRetry(transcriptPath);
 
-  // Debug: show last 3 lines of the file (just the type)
   debug('last 3 lines types:', lines.slice(-3).map((line, idx) => {
     try {
-      const e = JSON.parse(line);
-      return { index: lines.length - 3 + idx, type: e.type, subtype: e.subtype, hasContent: !!e.message?.content };
-    } catch { return { index: lines.length - 3 + idx, error: 'parse failed' }; }
+      const entry = JSON.parse(line);
+      return { index: lines.length - 3 + idx, type: entry.type, subtype: entry.subtype, hasContent: !!entry.message?.content };
+    } catch {
+      return { index: lines.length - 3 + idx, error: 'parse failed' };
+    }
   }));
 
-  /**
-   * Check if content is meaningful (not just whitespace/newlines)
-   * @param {string} text
-   * @returns {boolean}
-   */
-  function hasContent(text) {
-    return text && text.trim().length > 0;
+  const output = config.memoryMode === 'agent'
+    ? await saveAgentTurn(lines, config, hookInput)
+    : await saveEpisodicTurn(lines);
+
+  if (output?.systemMessage) {
+    process.stdout.write(JSON.stringify(output));
   }
-
-  /**
-   * Extract the last turn's user input and assistant response
-   *
-   * A Turn = User sends message → Claude responds (may include multiple tool calls)
-   * Turn boundary is marked by: {"type":"system","subtype":"turn_duration"}
-   *
-   * User messages may be:
-   *   - Original input: {"type":"user","message":{"content":"string"}}
-   *   - Tool result: {"type":"user","message":{"content":[{"type":"tool_result",...}]}}
-   *
-   * Assistant messages may contain multiple content blocks:
-   *   - thinking: Claude's internal reasoning
-   *   - tool_use: Tool invocations
-   *   - text: Final response to user (this is what we want)
-   */
-  function extractLastTurn(lines) {
-    // IMPORTANT: When Stop hook runs, turn_duration for current turn hasn't been written yet.
-    // The turn_duration marker is written AFTER the Stop hook completes.
-    // So current turn END is always at the end of the file.
-    const turnEndIndex = lines.length;
-
-    // Current turn START is right after the last turn_duration marker.
-    // Only turn_duration marks turn boundaries (file-history-snapshot is NOT a turn boundary).
-    // If no marker found, start from beginning of file.
-    let turnStartIndex = 0;
-    for (let i = lines.length - 1; i >= 0; i--) {
-      try {
-        const e = JSON.parse(lines[i]);
-        if (e.type === 'system' && e.subtype === 'turn_duration') {
-          turnStartIndex = i + 1;
-          break;
-        }
-      } catch {}
-    }
-
-    debug('turn range:', { turnStartIndex, turnEndIndex, totalLines: lines.length });
-
-    // Collect user and assistant content from the turn
-    const userTexts = [];
-    const assistantTexts = [];
-
-    // Debug: log each line's type in the turn
-    const lineTypes = [];
-
-    for (let i = turnStartIndex; i < turnEndIndex; i++) {
-      try {
-        const e = JSON.parse(lines[i]);
-        const content = e.message?.content;
-
-        // Debug: record line type
-        const lineInfo = { index: i, type: e.type };
-        if (e.type === 'assistant' && Array.isArray(content)) {
-          lineInfo.contentTypes = content.map(b => b.type);
-        }
-        lineTypes.push(lineInfo);
-
-        if (e.type === 'user') {
-          // User message - distinguish between original input and tool_result
-          if (typeof content === 'string') {
-            // Original user input (plain string)
-            userTexts.push(content);
-          } else if (Array.isArray(content)) {
-            // Check if it's a tool_result (skip) or text blocks (include)
-            for (const block of content) {
-              if (block.type === 'text' && block.text) {
-                userTexts.push(block.text);
-              }
-              // Skip tool_result - it's part of Claude's workflow, not user input
-            }
-          }
-        }
-
-        if (e.type === 'assistant') {
-          // Assistant message - extract text blocks only
-          if (Array.isArray(content)) {
-            for (const block of content) {
-              if (block.type === 'text' && block.text) {
-                assistantTexts.push(block.text);
-              }
-              // Skip: thinking (internal), tool_use (workflow)
-            }
-          } else if (typeof content === 'string') {
-            assistantTexts.push(content);
-          }
-        }
-      } catch {}
-    }
-
-    // Debug: output line types
-    debug('line types in turn:', lineTypes);
-    debug('assistantTexts count:', assistantTexts.length);
-
-    return {
-      user: userTexts.join('\n\n'),
-      assistant: assistantTexts.join('\n\n')
-    };
-  }
-
-  // Extract the last turn's content
-  const lastTurn = extractLastTurn(lines);
-  const lastUser = lastTurn.user;
-  const lastAssistant = lastTurn.assistant;
-
-  debug('extracted:', {
-    userLength: lastUser?.length || 0,
-    assistantLength: lastAssistant?.length || 0,
-    userPreview: lastUser?.slice(0, 100),
-    assistantPreview: lastAssistant?.slice(0, 100)
-  });
-
-  // Run both in parallel with Promise.all
-  const promises = [];
-  const results = [];
-  const skipped = [];
-
-  // Check if user content is meaningful
-  if (lastUser) {
-    if (hasContent(lastUser)) {
-      const len = lastUser.length;
-      promises.push(
-        addMemory({ content: lastUser, role: 'user', messageId: `u_${Date.now()}` })
-          .then(r => results.push({ type: 'USER', len, ...r }))
-          .catch(e => results.push({ type: 'USER', len, ok: false, error: e.message }))
-      );
-    } else {
-      skipped.push({ type: 'USER', reason: 'whitespace-only content' });
-    }
-  }
-
-  // Check if assistant content is meaningful
-  if (lastAssistant) {
-    if (hasContent(lastAssistant)) {
-      const len = lastAssistant.length;
-      promises.push(
-        addMemory({ content: lastAssistant, role: 'assistant', messageId: `a_${Date.now()}` })
-          .then(r => results.push({ type: 'ASSISTANT', len, ...r }))
-          .catch(e => results.push({ type: 'ASSISTANT', len, ok: false, error: e.message }))
-      );
-    } else {
-      skipped.push({ type: 'ASSISTANT', reason: 'whitespace-only content' });
-    }
-  }
-
-  await Promise.all(promises);
-
-  // Check if all calls succeeded
-  const allSuccess = results.length > 0 && results.every(r => r.ok && !r.error);
-
-  // Debug output
-  debug('results:', results);
-  debug('skipped:', skipped);
-
-  // Build output message
-  let output = '';
-
-  if (allSuccess) {
-    const details = results.map(r => `${r.type.toLowerCase()}: ${r.len}`).join(', ');
-    output = `💾 Memory saved (${results.length}) [${details}]`;
-    // Add skipped info if any
-    if (skipped.length > 0) {
-      output += `\n⏭️ Skipped: ${skipped.map(s => `${s.type} (${s.reason})`).join(', ')}`;
-    }
-    process.stdout.write(JSON.stringify({ systemMessage: output }));
-    process.exit(0);
-  } else if (results.length === 0 && skipped.length > 0) {
-    // All content was skipped
-    output = `⏭️ EverMem: No content to save\n`;
-    for (const s of skipped) {
-      output += `  • ${s.type}: ${s.reason}\n`;
-    }
-    process.stdout.write(JSON.stringify({ systemMessage: output }));
-    process.exit(0);
-  } else {
-    // Failure: show detailed errors via systemMessage
-    function truncateBody(body) {
-      if (!body) return body;
-      const copy = { ...body };
-      if (copy.content && typeof copy.content === 'string' && copy.content.length > 100) {
-        copy.content = copy.content.substring(0, 100) + '... [truncated]';
-      }
-      return copy;
-    }
-
-    output = '💾 EverMem: Save failed\n';
-    for (const r of results) {
-      if (r.error) {
-        output += `${r.type}: ERROR - ${r.error}\n`;
-      } else if (!r.ok) {
-        output += `${r.type}: FAILED (${r.status})\n`;
-        output += `Request: ${JSON.stringify(truncateBody(r.body), null, 2)}\n`;
-        output += `Response: ${JSON.stringify(r.response, null, 2)}\n`;
-      }
-    }
-    // Also show skipped if any
-    if (skipped.length > 0) {
-      output += `⏭️ Skipped: ${skipped.map(s => `${s.type} (${s.reason})`).join(', ')}\n`;
-    }
-    process.stdout.write(JSON.stringify({ systemMessage: output }));
-  }
-
-} catch (e) {
-  // Silent on errors
+} catch {
   process.exit(0);
 }

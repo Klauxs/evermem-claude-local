@@ -8,11 +8,14 @@ View the EverMem debug log to troubleshoot issues.
 
 ## Instructions
 
-Show the user the recent debug log entries from `/tmp/evermem-debug.log`.
+Show the user the recent debug log entries from the platform-specific debug log path:
+- Windows: `%TEMP%\\evermem-debug.log`
+- macOS/Linux: `/tmp/evermem-debug.log`
 
 1. First check if debug mode is enabled by looking for `EVERMEM_DEBUG=1` in the plugin's `.env` file
-2. Read the last 50 lines of the debug log file
-3. If the file doesn't exist or is empty, inform the user how to enable debug mode
+2. Resolve the correct debug log path for the current OS
+3. Read the last 50 lines of the debug log file
+4. If the file doesn't exist or is empty, inform the user how to enable debug mode
 
 ## Actions
 
@@ -21,9 +24,11 @@ Show the user the recent debug log entries from `/tmp/evermem-debug.log`.
    grep "EVERMEM_DEBUG" /path/to/plugin/.env 2>/dev/null || echo "Not configured"
    ```
 
-2. Show recent logs:
+2. Resolve log path and show recent logs:
    ```bash
-   tail -50 /tmp/evermem-debug.log 2>/dev/null || echo "No debug log found"
+   LOG_PATH="$(node -e 'const path=require("path"); process.stdout.write(process.platform === "win32" ? path.join(process.env.TEMP || process.env.TMP || "C:/Windows/Temp", "evermem-debug.log") : "/tmp/evermem-debug.log")')"
+   printf '%s\n' "$LOG_PATH"
+   tail -50 "$LOG_PATH" 2>/dev/null || echo "No debug log found"
    ```
 
 3. Format the output for the user, highlighting:
@@ -37,7 +42,7 @@ Show the user the recent debug log entries from `/tmp/evermem-debug.log`.
 📋 EverMem Debug Log
 
 Status: Debug mode [ENABLED/DISABLED]
-Log file: /tmp/evermem-debug.log
+Log file: [resolved path]
 
 --- Recent Entries ---
 [timestamp] [inject] ...
@@ -45,8 +50,8 @@ Log file: /tmp/evermem-debug.log
 
 --- Tips ---
 • Enable debug: Add EVERMEM_DEBUG=1 to .env
-• Clear log: > /tmp/evermem-debug.log
-• Live view: tail -f /tmp/evermem-debug.log
+• Windows log path: %TEMP%\\evermem-debug.log
+• macOS/Linux log path: /tmp/evermem-debug.log
 ```
 
 ## Additional Options

@@ -124,7 +124,9 @@ To use the hub, run `/evermem:hub` and follow the instructions.
 
 | Variable | Description | Required |
 |----------|-------------|----------|
-| `EVERMEM_API_KEY` | Your EverMem API key | Yes |
+| `EVERMEM_API_KEY` | API key for authenticated EverMem servers | Required for EverMem Cloud; optional for local/custom no-auth deployments |
+| `EVERMEM_API_URL` | Base URL for a custom or local EverMem API server | Optional |
+| `EVERMEM_MEMORY_MODE` | `agent` (default) for Claude Code trajectories, or `episodic` for legacy behavior | Optional |
 
 ### Project-Specific Settings
 
@@ -140,14 +142,19 @@ Project-specific notes here.
 
 ## Troubleshooting
 
-### API Key Not Configured
+### API Not Configured
 
 ```bash
-# Check if the key is set
+# Check if auth or a custom API URL is set
 echo $EVERMEM_API_KEY
+echo $EVERMEM_API_URL
 
-# If empty, add to your shell profile and reload
+# For EverMem Cloud
 export EVERMEM_API_KEY="your-key-here"
+
+# Or for a local/custom deployment that does not require auth
+export EVERMEM_API_URL="http://localhost:8000"
+
 source ~/.zshrc
 ```
 
@@ -155,11 +162,11 @@ source ~/.zshrc
 
 1. Memories are only recalled after you've had previous conversations
 2. Short prompts (less than 3 words) are skipped
-3. Check that your API key is valid at [console.evermind.ai](https://console.evermind.ai/)
+3. Check that your API key is valid at [console.evermind.ai](https://console.evermind.ai/), or that your custom `EVERMEM_API_URL` is reachable and compatible
 
 ### API Errors
 
-- **403 Forbidden**: Invalid or expired API key
+- **401/403**: Invalid or missing API key, or your custom server requires auth
 - **502 Bad Gateway**: Server temporarily unavailable, try again
 
 ### Debug Mode
@@ -170,11 +177,11 @@ Enable debug logging to troubleshoot issues:
 # Set environment variable
 export EVERMEM_DEBUG=1
 
-# View logs in real-time
-tail -f /tmp/evermem-debug.log
+# macOS/Linux log file
+# /tmp/evermem-debug.log
 
-# Clear logs
-> /tmp/evermem-debug.log
+# Windows log file
+# %TEMP%\evermem-debug.log
 ```
 
 Run `/evermem:debug` to view recent debug logs directly.
@@ -418,7 +425,7 @@ No AI summarization is used - pure local data extraction for zero latency and no
 | Network error | "Cannot reach EverMem server. Check your internet connection." |
 | Timeout | "EverMem server is slow or unreachable." |
 | 401/Unauthorized | "Authentication failed. Check your EVERMEM_API_KEY." |
-| 404 | "API endpoint not found. Check EVERMEM_BASE_URL." |
+| 404 | "API endpoint not found. Check EVERMEM_API_URL." |
 | Module not found | "Missing dependency. Run: npm install" |
 
 All errors return `continue: true` to ensure session starts normally.
@@ -810,7 +817,8 @@ The `/evermem:hub` command opens a web dashboard for visualizing memories. Due t
 ┌─────────────────────────────────────────────────────────────────────────────┐
 │                           /evermem:hub Command                               │
 │  1. Start proxy server: node server/proxy.js &                              │
-│  2. Generate URL: http://localhost:3456/?key=${EVERMEM_API_KEY}             │
+│  2. Generate URL: http://localhost:3456/?key=${EVERMEM_API_KEY} when a key  │
+│     is configured, otherwise use http://localhost:3456/                     │
 │  3. User opens URL in browser                                                │
 └─────────────────────────────────────────────────────────────────────────────┘
                                     │
@@ -824,7 +832,8 @@ The `/evermem:hub` command opens a web dashboard for visualizing memories. Due t
 │  └─────────────┘  └─────────────┘  └─────────────┘  └─────────────┘        │
 │                                                                              │
 │  Data Flow:                                                                  │
-│  1. GET /api/groups → Local groups.jsonl (filtered by keyId)                │
+│  1. GET /api/groups → Local groups.jsonl (filtered by keyId when auth is    │
+│     configured, or by null key for local no-auth mode)                      │
 │  2. For each group: POST /api/v1/memories/get → Fetch memories               │
 │  3. Render dashboard with aggregated data                                    │
 └─────────────────────────────────────────────────────────────────────────────┘
@@ -886,7 +895,7 @@ function getGroupsForKey(keyId) {
 // Key route: Forward POST requests to EverMind API
 // Browser sends:  POST /api/v1/memories/search  { query, filters, ... }
 // Browser sends:  POST /api/v1/memories/get     { memory_type, filters, ... }
-// Proxy forwards to upstream API with Authorization header
+// Proxy forwards to upstream API with optional Authorization header
 ```
 
 ### Dashboard (`assets/dashboard.html`)
@@ -896,9 +905,9 @@ function getGroupsForKey(keyId) {
 ```javascript
 async function loadGroups() {
   // 1. Fetch groups from local storage (via proxy)
-  const groupsData = await fetch('/api/groups', {
-    headers: { 'Authorization': `Bearer ${apiKey}` }
-  });
+  const groupsData = await fetch('/api/groups', apiKey
+    ? { headers: { 'Authorization': `Bearer ${apiKey}` } }
+    : {});
 
   // 2. For each group, fetch memories with pagination
   for (const group of groups) {

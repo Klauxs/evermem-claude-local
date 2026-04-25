@@ -545,8 +545,8 @@
       EverMem Memory Hub
     </h1>
     <div class="header-controls">
-      <label style="font-size: 12px; color: #8b949e;">API Key:</label>
-      <input type="password" id="api-key-input" class="api-input" placeholder="Enter your EverMem API key" />
+      <label style="font-size: 12px; color: #8b949e;">API Key (optional):</label>
+      <input type="password" id="api-key-input" class="api-input" placeholder="Enter API key if your server requires auth" />
       <button id="load-btn" class="api-btn" onclick="loadData()">Load</button>
       <button id="refresh-btn" class="refresh-btn" onclick="refreshData()" title="Refresh" style="display: none;">
         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
@@ -555,7 +555,7 @@
         </svg>
       </button>
     </div>
-    <span class="stats" id="stats">Enter API key to load memories</span>
+    <span class="stats" id="stats">Load memories from your configured EverMem server</span>
   </div>
 
   <div id="progress-view">
@@ -563,7 +563,7 @@
       <div id="content">
         <div class="empty-state">
           <h3>Welcome to EverMem Memory Hub</h3>
-          <p>Enter your EverMem API key above to view your memory statistics and timeline.</p>
+          <p>Enter an API key if your server requires authentication. For a local no-auth deployment, leave it blank and click Load.</p>
         </div>
       </div>
     </div>
@@ -599,6 +599,13 @@
     const urlParams = new URLSearchParams(window.location.search);
     const hashParams = new URLSearchParams(window.location.hash.slice(1));
     const keyFromUrl = urlParams.get('key') || urlParams.get('apiKey') || hashParams.get('key') || hashParams.get('apiKey');
+
+    function buildAuthHeaders(headers = {}) {
+      if (!apiKey) {
+        return headers;
+      }
+      return { ...headers, 'Authorization': `Bearer ${apiKey}` };
+    }
 
     // ===== Emoji Mapping =====
     const EMOJI_MAP = {
@@ -752,73 +759,42 @@
     checkProxy();
 
     async function fetchAllMemories() {
-      // 1. Get the list of local groups for this API key
-      const groupsResponse = await fetch(`${PROXY_URL}/api/groups`, {
-        headers: { 'Authorization': `Bearer ${apiKey}` }
-      });
-
-      if (!groupsResponse.ok) {
-        throw new Error(`Failed to load groups: ${groupsResponse.status} ${groupsResponse.statusText}`);
-      }
-
-      const groupsData = await groupsResponse.json();
-      const groups = groupsData.groups || [];
-
-      if (groups.length === 0) {
-        // No locally-tracked groups → nothing to show. v1 requires a concrete filter
-        // (user_id or group_id), so there is no "fetch everything" path.
-        return { data: { episodes: [] } };
-      }
-
-      // 2. For each group, paginate /api/v1/memories/get
-      const allEpisodes = [];
+      const allMemories = [];
       const PAGE_SIZE = 100;
+      let page = 1;
+      let memoryMode = 'episodic';
 
-      for (const group of groups) {
-        let page = 1;
-        while (true) {
-          const response = await fetch(`${PROXY_URL}/api/v1/memories/get`, {
-            method: 'POST',
-            headers: {
-              'Authorization': `Bearer ${apiKey}`,
-              'Content-Type': 'application/json'
-            },
-            body: JSON.stringify({
-              memory_type: 'episodic_memory',
-              filters: { group_id: group.id },
-              page,
-              page_size: PAGE_SIZE,
-              rank_by: 'timestamp',
-              rank_order: 'desc'
-            })
-          });
+      while (true) {
+        const response = await fetch(`${PROXY_URL}/api/hub/memories`, {
+          method: 'POST',
+          headers: buildAuthHeaders({ 'Content-Type': 'application/json' }),
+          body: JSON.stringify({
+            page,
+            page_size: PAGE_SIZE
+          })
+        });
 
-          if (!response.ok) {
-            if (page === 1) {
-              const errorData = await response.json().catch(() => ({}));
-              // Surface error only for the first failure per group, then skip it
-              console.warn(`Group ${group.id} failed:`, errorData.message || response.status);
-            }
-            break;
+        if (!response.ok) {
+          const errorData = await response.json().catch(() => ({}));
+          if (response.status === 401 && !apiKey) {
+            throw new Error('This server requires an API key. Provide EVERMEM_API_KEY or open the Hub URL with ?key=...');
           }
-
-          const payload = await response.json();
-          const episodes = payload?.data?.episodes || [];
-          if (episodes.length === 0) break;
-
-          // Attach group_id to each episode so the UI can filter/label by project
-          for (const ep of episodes) {
-            if (!ep.group_id) ep.group_id = group.id;
-          }
-          allEpisodes.push(...episodes);
-
-          const total = payload?.data?.total_count ?? Infinity;
-          if (episodes.length < PAGE_SIZE || page * PAGE_SIZE >= total) break;
-          page += 1;
+          throw new Error(errorData.message || `Failed to load memories: ${response.status} ${response.statusText}`);
         }
+
+        const payload = await response.json();
+        const items = payload?.data?.memories || payload?.data?.episodes || [];
+        memoryMode = payload?.data?.memory_mode || memoryMode;
+        if (items.length === 0) break;
+
+        allMemories.push(...items);
+
+        const total = payload?.data?.total_count ?? Infinity;
+        if (items.length < PAGE_SIZE || page * PAGE_SIZE >= total) break;
+        page += 1;
       }
 
-      return { data: { episodes: allEpisodes } };
+      return { data: { memories: allMemories, memory_mode: memoryMode } };
     }
 
     async function loadData() {
@@ -828,10 +804,6 @@
       }
 
       apiKey = document.getElementById('api-key-input').value.trim();
-      if (!apiKey) {
-        alert('Please enter an API key');
-        return;
-      }
 
       const loadBtn = document.getElementById('load-btn');
       loadBtn.disabled = true;
@@ -840,7 +812,7 @@
       document.getElementById('content').innerHTML = `
         <div class="loading-message">
           <div class="spinner"></div>
-          <p>Loading memories from EverMem Cloud...</p>
+          <p>Loading memories from EverMem...</p>
         </div>
       `;
 
@@ -853,7 +825,7 @@
           document.getElementById('content').innerHTML = `
             <div class="empty-state">
               <h3>No Memories Found</h3>
-              <p>Your EverMem account doesn't have any memories yet. Start using Claude Code with the EverMem plugin to build your memory.</p>
+              <p>No memories were found for the configured user in the current memory mode.</p>
             </div>
           `;
           document.getElementById('stats').textContent = '0 memories';
@@ -869,7 +841,7 @@
             <strong>Error loading memories:</strong> ${error.message}
           </div>
           <div class="empty-state">
-            <p>Please check your API key and try again.</p>
+            <p>Please check your proxy server, EVERMEM_USER_ID configuration, and API authentication, then try again.</p>
           </div>
         `;
       } finally {
@@ -889,14 +861,26 @@
 
     function populateProjectFilter() {
       const select = document.getElementById('project-filter');
-      const groups = new Set();
-      memories.forEach(m => { if (m.groupId) groups.add(m.groupId); });
+      const groups = new Map();
+      memories.forEach(memory => {
+        if (!memory.groupId) {
+          return;
+        }
+        const currentLatest = groups.get(memory.groupId);
+        if (!currentLatest || new Date(memory.timestamp) > new Date(currentLatest)) {
+          groups.set(memory.groupId, memory.timestamp);
+        }
+      });
+
+      const sortedGroups = Array.from(groups.entries())
+        .sort((a, b) => new Date(b[1]) - new Date(a[1]))
+        .map(([groupId]) => groupId);
 
       select.innerHTML = '<option value="">All Projects</option>';
-      groups.forEach(g => {
-        const displayName = g.replace(/^claude-code:/, '');
+      sortedGroups.forEach(groupId => {
+        const displayName = groupId.replace(/^claude-code:/, '');
         const option = document.createElement('option');
-        option.value = g;
+        option.value = groupId;
         option.textContent = displayName.length > 40 ? '...' + displayName.slice(-40) : displayName;
         select.appendChild(option);
       });
@@ -927,30 +911,49 @@
     }
 
     function transformApiResponse(apiResponse) {
-      const episodes = apiResponse?.data?.episodes;
-      if (!Array.isArray(episodes)) return [];
+      const items = apiResponse?.data?.memories || apiResponse?.data?.episodes;
+      if (!Array.isArray(items)) return [];
 
-      return episodes.map((ep, i) => {
-        // v1 get → content in ep.episode; v1 search → content in ep.summary.
-        // Accept both so this transform works regardless of upstream endpoint.
-        const content = ep.episode || ep.summary || ep.content || '';
-        const timestamp = ep.timestamp || ep.create_time || new Date().toISOString();
+      return items.map((item, i) => {
+        const content = item.content || item.episode || item.summary || '';
+        const timestamp = item.timestamp || item.create_time || new Date().toISOString();
         const date = new Date(timestamp);
 
         return {
-          id: ep.id || ep.message_id || `mem_${i}`,
+          id: item.id || item.message_id || `mem_${i}`,
           content,
-          subject: ep.subject || '',
-          groupId: ep.group_id || '',
-          participants: ep.participants || [],
+          subject: item.subject || '',
+          groupId: item.group_id || '',
+          rawGroupId: item.raw_group_id || '',
+          sessionId: item.session_id || '',
+          participants: item.participants || item.metadata?.participants || [],
           timestamp,
           date: formatLocalDate(date),
           time: date.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' }),
-          score: ep.score || 0,
-          memoryType: ep.memory_type,
-          summary: ep.summary || ''
+          score: item.score || 0,
+          memoryType: item.memory_type || 'episodic_memory',
+          summary: item.summary || '',
+          metadata: item.metadata || {}
         };
       }).filter(m => m.content);
+    }
+
+    function getMemoryTypeLabel(memory) {
+      if (memory.memoryType === 'agent_case') return 'Case';
+      if (memory.memoryType === 'agent_skill') return 'Skill';
+      return 'Memory';
+    }
+
+    function getMemoryTypeColor(memory) {
+      if (memory.memoryType === 'agent_case') return '#FFC53D';
+      if (memory.memoryType === 'agent_skill') return '#f0883e';
+      return '#58a6ff';
+    }
+
+    function getProjectDisplayName(memory) {
+      if (!memory.groupId) return '';
+      if (memory.groupId === 'agent-skills') return 'skill-library';
+      return memory.groupId.replace(/^claude-code:/, '');
     }
 
     function renderDashboard() {
@@ -967,7 +970,7 @@
           <div class="stat-card">
             <div class="label">Projects</div>
             <div class="value">${stats.uniqueGroups}</div>
-            <div class="trend neutral">Unique workspaces</div>
+            <div class="trend neutral">Groups with memories</div>
           </div>
           <div class="stat-card">
             <div class="label">Active Days</div>
@@ -1327,7 +1330,7 @@
         header.innerHTML = `
           <span class="day-date">${dateDisplay}</span>
           ${date === todayStr ? '<span class="day-badge">Today</span>' : ''}
-          <span class="day-stats">${dayMemories.length} ${dayMemories.length === 1 ? 'memory' : 'memories'}</span>
+          <span class="day-stats">${dayMemories.length} ${dayMemories.length === 1 ? 'item' : 'items'}</span>
         `;
         dayDiv.appendChild(header);
 
@@ -1341,16 +1344,22 @@
 
           const displaySubject = memory.subject || (memory.content.length > 40 ? memory.content.slice(0, 40) + '...' : memory.content);
           const displayContent = memory.content.length > 150 ? memory.content.slice(0, 150) + '...' : memory.content;
-          const projectName = memory.groupId ? memory.groupId.replace(/^claude-code:/, '') : '';
+          const projectName = getProjectDisplayName(memory);
           const emoji = getMemoryEmoji(memory.subject || memory.content);
+          const typeLabel = getMemoryTypeLabel(memory);
+          const typeColor = getMemoryTypeColor(memory);
 
           card.innerHTML = `
             <div class="memory-card-header">
               <span class="memory-emoji">${emoji}</span>
+              <span class="memory-type-dot" style="background: ${typeColor};"></span>
               <span class="memory-label">${escapeHtml(displaySubject)}</span>
               <span class="memory-time">${memory.time}</span>
             </div>
-            ${projectName ? `<div class="memory-project">\uD83D\uDCC1 ${escapeHtml(projectName)}</div>` : ''}
+            <div style="display: flex; gap: 8px; align-items: center; margin-bottom: 6px; flex-wrap: wrap;">
+              <span style="font-size: 10px; color: ${typeColor}; text-transform: uppercase; letter-spacing: 0.5px; font-weight: 600;">${typeLabel}</span>
+              ${projectName ? `<div class="memory-project">\uD83D\uDCC1 ${escapeHtml(projectName)}</div>` : ''}
+            </div>
             <div class="memory-content">${escapeHtml(displayContent)}</div>
           `;
           cardsDiv.appendChild(card);
@@ -1362,13 +1371,14 @@
     }
 
     function openModal(memory) {
-      const projectName = memory.groupId ? memory.groupId.replace(/^claude-code:/, '') : '';
+      const projectName = getProjectDisplayName(memory);
       const dateStr = new Date(memory.timestamp).toLocaleDateString('en-US', {
         weekday: 'long', year: 'numeric', month: 'long', day: 'numeric', hour: '2-digit', minute: '2-digit'
       });
+      const typeLabel = getMemoryTypeLabel(memory);
 
-      document.getElementById('modal-title').textContent = memory.subject || 'Memory';
-      document.getElementById('modal-meta').innerHTML = `${dateStr}${projectName ? ` · <span style="font-family: monospace;">${escapeHtml(projectName)}</span>` : ''}`;
+      document.getElementById('modal-title').textContent = memory.subject || typeLabel;
+      document.getElementById('modal-meta').innerHTML = `${escapeHtml(typeLabel)} · ${dateStr}${projectName ? ` · <span style="font-family: monospace;">${escapeHtml(projectName)}</span>` : ''}`;
       document.getElementById('modal-content').textContent = memory.content;
 
       document.getElementById('modal-overlay').classList.add('visible');
